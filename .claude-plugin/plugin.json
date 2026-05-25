@@ -1,0 +1,8 @@
+{
+  "name": "teamwork-task",
+  "description": "Fetch Teamwork.com tasklist/task by URL, implement each task in the current repo, commit per task using TYPE(scope): Message convention, and log time back to Teamwork. Configurable time tracking (real time rounded to 5 min, or ask after each task) and branching strategy.",
+  "author": {
+    "name": "Stanislav Červeňák",
+    "email": "info@wame.sk"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "teamwork": {
+    "base_url": "https://<workspace>.teamwork.com",
+    "api_token": ""
+  },
+  "time_mode": "real_rounded_5m",
+  "time_rounding_minutes": 5,
+  "branching_mode": "current_branch",
+  "default_language": "sk",
+  "auto_complete_finished_tasks": false,
+  "skip_completed_tasks": true,
+  "is_billable_by_default": true
+}
