@@ -79,9 +79,9 @@ Optional flags (override the saved config **for this run only**, not persisted):
    - Implements the change in the current repo.
    - Runs relevant tests, if any.
    - Runs Pint formatting for PHP changes.
-   - Stops the timer, rounds up to the configured minute step (default 5).
+   - Stops the timer, rounds the duration **up** to the configured minute step (default 5).
    - Commits using the `TYPE(scope)[<task-id>]: Message` convention (no `Co-Authored-By` lines).
-   - Logs time back to Teamwork via the API with a Slovak description of what was actually done.
+   - Logs time back to Teamwork via the API as a **sequential, non-overlapping** entry (see [Time logging behaviour](#time-logging-behaviour)) with a **business-oriented** Slovak description.
    - Optionally marks the task as completed in Teamwork.
 6. **Prints a summary table** (task ID, title, minutes, commit hash, TW status) and reminds you to `git push` manually.
 
@@ -136,10 +136,34 @@ the job for offline support. Reuse the existing `Invoice::toArray()` shape.
 
 All **comments** on the task are fetched too (when `fetch_comments=true`) and surfaced in the plan as a short digest so prior decisions and clarifications carry into the work.
 
+## Time logging behaviour
+
+Two hard rules govern every entry the plugin writes to Teamwork:
+
+1. **Sequential, non-overlapping entries.** Even though implementation work can overlap in real time (parallel tool calls, interleaved investigations), the time **logged to Teamwork** is laid out strictly back-to-back. The plugin maintains a single *session cursor* that starts at the time the worker loop begins (floored to the nearest rounding step) and advances by exactly the logged duration after each entry. Result: if task A is logged as `start 10:15, 20 min`, task B will be logged as `start 10:35, …` — never `10:32`, never overlapping `10:25–10:45`.
+2. **Everything aligned to the rounding step (default 5 min).** Both the **duration** and the **start time** are multiples of `time_rounding_minutes`. You will never see a log starting at `:17` or lasting `13 min`; the plugin rounds the duration **up** and floors the initial cursor to the nearest 5-minute boundary, then advances in 5-minute steps. So entries look like `10:15 / 20 min`, `10:35 / 15 min`, `10:50 / 5 min`, …
+3. **Plan time is never logged.** The session cursor starts only after the plan is approved (Step 5.5 in `SKILL.md`). Time spent on planning, reading the user's clarifications, or waiting for an `AskUserQuestion` response is **not** billed.
+
+If a `POST` to Teamwork fails (network blip, 5xx), the cursor does **not** advance — the next successful log keeps the same start time so your timesheet stays contiguous.
+
+## Time-log description tone
+
+The text that lands in Teamwork's time-log description is written from the perspective of someone reading the timesheet for billing or status (PM, client, accountant) — **not** a developer reading a code review. State **what was delivered for the user or the business**. Include a technical detail only when it materially helps identify the work (a specific module name, a feature flag, a migration ID). Avoid variable names, line counts, library versions, and diff stats. Keep it to 1–2 sentences in `default_language` (Slovak by default).
+
+**Good (business):**
+- *„Pridaná možnosť exportu faktúr do PDF s podporou témy nájomcu."*
+- *„Opravený výpadok prihlasovania pri súbežnom obnovení relácie."*
+
+**Avoid (technical):**
+- *„Refactored InvoiceController::export() to use new DompdfRenderer, added 3 tests."*
+- *„Updated 8 files, +142 −37 lines, bumped filament/filament to 5.2."*
+
 ## Time tracking modes
 
 - **`real_rounded_5m` (default)** — the plugin measures wall-clock time between starting the task and the commit, then rounds **up** to the nearest `time_rounding_minutes`. Best for billable work where you trust the measurement.
 - **`ask`** — after each commit, the plugin asks you how many minutes to log, with the measured value prefilled. Use this when you frequently take long breaks, multitask, or want explicit control.
+
+Either mode still feeds into the sequential, 5-minute-aligned session cursor above — `ask` only lets you override the measured duration, not the start time.
 
 ## Branching modes
 

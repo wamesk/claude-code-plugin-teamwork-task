@@ -206,6 +206,23 @@ Read `branching_mode` from config (or `--branching` override).
   git rev-parse --verify "$BRANCH" >/dev/null 2>&1 && git checkout "$BRANCH" || git checkout -b "$BRANCH"
   ```
 
+### Step 5.5 — Initialize the session time cursor
+
+Time logs in Teamwork **must not overlap** even if implementation work overlaps in real time. The plugin maintains a **session cursor** that advances strictly forward as each task is logged, so the resulting time entries are contiguous (no gaps, no overlaps) and every entry's start time is also aligned to the rounding step (default 5 minutes).
+
+Initialize the cursor **once**, right before the worker loop starts (after plan approval — plan time is not billed):
+
+```bash
+ROUND=$(jq -r '.time_rounding_minutes // 5' "$CONFIG_FILE")
+ROUND_SECS=$(( ROUND * 60 ))
+
+NOW_TS=$(date +%s)
+# Floor current epoch to the nearest ROUND-minute boundary (HH:00, HH:05, HH:10, ...)
+SESSION_CURSOR_TS=$(( NOW_TS - (NOW_TS % ROUND_SECS) ))
+```
+
+After each task's time log is posted, advance the cursor by exactly the logged duration (Step 6.8). The cursor is the **single source of truth** for both the next log's `date` and `time` fields — never read `date +%H:%M:%S` again inside the worker loop.
+
 ---
 
 ## Step 6 — Worker loop (per task)
@@ -288,27 +305,49 @@ FIX(auth)[124001]: Resolve session timeout race condition
 ### 6.8 Log time back to Teamwork
 `POST ${BASE}/projects/api/v3/tasks/${TASK_ID}/time.json`
 
-The Slovak description for the time log should be written in Slovak (per project default `default_language=sk`) and describe **what was actually done**, not just the task title.
+**Non-overlapping, sequential time logs (hard rule).** Even though implementation work may overlap in real time (parallel tool calls, interleaved tasks), the time entries written to Teamwork **must be strictly contiguous** — every log's `date + time + minutes` window must end exactly where the next log's window begins. The plugin uses the `SESSION_CURSOR_TS` from Step 5.5 as the single source of truth and never re-reads wall-clock time inside the loop. Both the start time and the duration are aligned to the rounding step (default 5 minutes), so a log will say `start 10:15, duration 20 min` and the next log will say `start 10:35` — never `10:32` or `10:17`.
+
+**Description tone — business, not technical.** Write the description from the perspective of someone reading the timesheet for billing or status (PM, client, accountant), not a developer reading a code review. State **what was delivered for the user/business**. Include a technical detail only when it materially helps identify the work (e.g. a specific module name, a flag/feature key, a migration number) — never variable names, line counts, library versions, or diff stats. Keep it to 1–2 sentences in the configured `default_language` (Slovak by default).
+
+**Good (business):**
+- *"Pridaná možnosť exportu faktúr do PDF s podporou témy nájomcu."*
+- *"Opravený výpadok prihlasovania pri súbežnom obnovení relácie."*
+- *"Doplnené akceptačné kritériá pre modul Užívatelia — pripravené na testovanie."*
+
+**Bad (technical, avoid):**
+- *"Refactored InvoiceController::export() to use new DompdfRenderer, added 3 tests, ran pint."*
+- *"Updated 8 files, +142 −37 lines, bumped filament/filament to 5.2."*
+- *"Implemented onMounted() lifecycle hook in InvoiceForm.vue."*
+
+**Sequential timestamp logic:**
 
 ```bash
-TODAY=$(date +%Y-%m-%d)
-NOW=$(date +%H:%M:%S)
+ROUND=$(jq -r '.time_rounding_minutes // 5' "$CONFIG_FILE")
+ROUND_SECS=$(( ROUND * 60 ))
 BILLABLE=$(jq -r '.is_billable_by_default // true' "$CONFIG_FILE")
+
+# Use the session cursor — NOT wall-clock time
+LOG_DATE=$(date -r "$SESSION_CURSOR_TS" +%Y-%m-%d)
+LOG_TIME=$(date -r "$SESSION_CURSOR_TS" +%H:%M:%S)
 
 PAYLOAD=$(jq -nc \
   --argjson minutes "$DURATION_MIN" \
-  --arg desc "$DESCRIPTION_SK" \
-  --arg date "$TODAY" \
-  --arg time "$NOW" \
+  --arg desc "$DESCRIPTION_BUSINESS" \
+  --arg date "$LOG_DATE" \
+  --arg time "$LOG_TIME" \
   --argjson billable "$BILLABLE" \
   '{timelog: {hours: 0, minutes: $minutes, description: $desc, date: $date, time: $time, isbillable: $billable}}')
 
 curl -sS -u "$AUTH" -H "Content-Type: application/json" -H "Accept: application/json" \
   -X POST -d "$PAYLOAD" \
   "${BASE}/projects/api/v3/tasks/${TASK_ID}/time.json"
+
+# Advance the cursor by exactly the logged duration (already a multiple of ROUND).
+# This guarantees the next log's start time = this log's end time. No gaps, no overlaps.
+SESSION_CURSOR_TS=$(( SESSION_CURSOR_TS + DURATION_MIN * 60 ))
 ```
 
-Verify HTTP status. On non-2xx → report to the user (do not retry blindly; the commit already exists).
+Verify HTTP status. On non-2xx → report to the user (do not retry blindly; the commit already exists). Do **not** advance `SESSION_CURSOR_TS` if the POST failed — the next successful log should reuse the same start time so the user's timesheet stays contiguous.
 
 ### 6.9 Complete the task in Teamwork (optional)
 If `config.auto_complete_finished_tasks == true`, or the user opts in at the first task of this session:
