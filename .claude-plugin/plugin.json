@@ -1,6 +1,7 @@
 {
   "name": "teamwork-task",
-  "description": "Fetch Teamwork.com tasklist/task by URL, implement each task in the current repo, commit per task using TYPE(scope): Message convention, and log time back to Teamwork. Configurable time tracking (real time rounded to 5 min, or ask after each task) and branching strategy.",
+  "version": "1.1.0",
+  "description": "Fetch Teamwork.com tasklist/task by URL, implement each task in the current repo, commit per task using TYPE(scope): Message convention, and log time back to Teamwork. Pulls task attachments and comments, auto-moves the task across the board (In progress → Internal testing), gates risky commits for review, and writes sequential time logs that pick up where your last Teamwork timelog ended.",
   "author": {
     "name": "Stanislav Červeňák",
     "email": "info@wame.sk"

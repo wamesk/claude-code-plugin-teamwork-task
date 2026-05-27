@@ -4,7 +4,49 @@
     "api_token": ""
   },
   "plan_mode": "overview",
-  "fetch_comments": true,
+
+  "fetch_comments_mode": "when_needed",
+  "fetch_attachments": true,
+  "fetch_file_comments": true,
+  "max_attachment_size_mb": 25,
+  "attachments_cleanup": "after_timelog",
+
+  "auto_commit_mode": "when_safe",
+  "auto_commit_risky_patterns": [
+    "\\.(vue|jsx|tsx|svelte|blade\\.php|css|scss|sass|less|html)$"
+  ],
+  "auto_commit_max_diff_lines": 100,
+
+  "auto_propose_tests": true,
+  "test_frameworks": {
+    "php_unit_preference": "auto",
+    "php_browser_preference": "auto",
+    "js_unit_preference": "auto",
+    "js_browser_preference": "auto"
+  },
+  "test_visual_file_patterns": [
+    "\\.(vue|jsx|tsx|svelte|blade\\.php|html)$",
+    "^resources/views/"
+  ],
+  "test_opt_out_keywords": [
+    "no tests",
+    "skip tests",
+    "without tests",
+    "bez testov",
+    "netreba testy"
+  ],
+
+  "time_cursor_strategy": "last_teamwork_timelog",
+  "include_commit_hash_in_log_description": true,
+
+  "board_workflow": {
+    "enabled": true,
+    "in_progress_stage": "In progress",
+    "done_stage": "Internal testing",
+    "done_stage_fallbacks": ["Testing"],
+    "match_mode": "case_insensitive"
+  },
+
   "time_mode": "real_rounded_5m",
   "time_rounding_minutes": 5,
   "branching_mode": "current_branch",
