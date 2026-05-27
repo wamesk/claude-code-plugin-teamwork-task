@@ -805,12 +805,49 @@ If PHP files changed: `vendor/bin/pint --dirty --format agent`.
 END_TS=$(date +%s)
 ELAPSED_MIN=$(( (END_TS - START_TS + 59) / 60 ))   # ceil to minutes
 ROUND=$(jq -r '.time_rounding_minutes // 5' "$CONFIG_FILE")
+ROUND_SECS=$(( ROUND * 60 ))
 DURATION_MIN=$(( ((ELAPSED_MIN + ROUND - 1) / ROUND) * ROUND ))   # round UP to nearest ROUND
 # Minimum 5 minutes (or ROUND) so trivial tasks still log something
 if [ "$DURATION_MIN" -lt "$ROUND" ]; then DURATION_MIN=$ROUND; fi
 ```
 
 If `time_mode == "ask"` → **AskUserQuestion** with the measured `DURATION_MIN` as the suggested answer; let the user override.
+
+### 6.6.1 Future-timestamp guard (hard rule)
+
+The session cursor advances by *logged* minutes, not by *real* minutes — so on a fast run where the model produces work much faster than wall-clock time would allow, the cursor drifts into the future. Teamwork accepts those POSTs without complaint (timesheets can legally hold future entries), but the resulting timesheet is useless for billing and confuses anyone reading it.
+
+Cap `DURATION_MIN` so the resulting log window ends at or before `now()`:
+
+```bash
+NOW=$(date +%s)
+# How much real-time space is still ahead of the cursor, floored to a ROUND multiple.
+HEADROOM_SECS=$(( NOW - SESSION_CURSOR_TS ))
+if [ "$HEADROOM_SECS" -lt 0 ]; then HEADROOM_SECS=0; fi
+HEADROOM_MIN=$(( (HEADROOM_SECS / 60 / ROUND) * ROUND ))
+
+TIMELOG_SKIPPED=0
+if [ "$HEADROOM_MIN" -lt "$ROUND" ]; then
+  echo "  ⚠ session cursor at $(date -r "$SESSION_CURSOR_TS" +%H:%M) is at/past now ($(date -r "$NOW" +%H:%M)) — skipping timelog for task ${TASK_ID}" >&2
+  TIMELOG_SKIPPED=1
+  SKIPPED_TIMELOGS+=("${TASK_ID} (cursor caught up with real time)")
+elif [ "$DURATION_MIN" -gt "$HEADROOM_MIN" ]; then
+  echo "  ⚠ measured ${DURATION_MIN}m would overshoot now() — clamping to ${HEADROOM_MIN}m so the timelog stays in the past" >&2
+  CLAMPED_TIMELOGS+=("${TASK_ID}: ${DURATION_MIN}m → ${HEADROOM_MIN}m")
+  DURATION_MIN=$HEADROOM_MIN
+fi
+```
+
+Why this matters: without the guard, a fast run will silently produce timesheet entries with start/end times that have not happened yet. The PM reads "16:00 — refactor done" at 13:30 and rightly asks how that is possible.
+
+`TIMELOG_SKIPPED=1` plumbs through Step 6.8 — the POST is skipped, the cursor is **not** advanced, and Step 6.8.5 (board move to *Internal testing*) is **also** skipped because the task is not yet considered finished from a billing standpoint. Step 7 surfaces `SKIPPED_TIMELOGS` and `CLAMPED_TIMELOGS` so the user can decide whether to fill in the missing time manually.
+
+Initialize the accounting arrays once at the start of the worker loop:
+
+```bash
+SKIPPED_TIMELOGS=()
+CLAMPED_TIMELOGS=()
+```
 
 ### 6.6.5 Safety gate — auto-commit or ask?
 
@@ -932,8 +969,14 @@ FIX(auth)[124001]: Resolve session timeout race condition
 **Sequential timestamp logic:**
 
 ```bash
-ROUND=$(jq -r '.time_rounding_minutes // 5' "$CONFIG_FILE")
-ROUND_SECS=$(( ROUND * 60 ))
+# Future-timestamp guard from Step 6.6.1 may have set TIMELOG_SKIPPED=1.
+# In that case do NOT POST — leave TIMELOG_OK=0 so Step 6.8.5 skips the board move
+# and the cursor is not advanced. The accounting array SKIPPED_TIMELOGS is rendered
+# in Step 7.
+if [ "${TIMELOG_SKIPPED:-0}" = "1" ]; then
+  TIMELOG_OK=0
+else
+
 BILLABLE=$(jq -r '.is_billable_by_default // true' "$CONFIG_FILE")
 INCL_HASH=$(jq -r '.include_commit_hash_in_log_description // true' "$CONFIG_FILE")
 
@@ -968,6 +1011,8 @@ else
   echo "  ⚠ time log POST failed (HTTP $HTTP) — cursor NOT advanced, board move skipped" >&2
   TIMELOG_OK=0
 fi
+
+fi  # end of TIMELOG_SKIPPED guard
 ```
 
 Verify HTTP status. On non-2xx → report to the user (do not retry blindly; the commit already exists). Do **not** advance `SESSION_CURSOR_TS` if the POST failed — the next successful log should reuse the same start time so the user's timesheet stays contiguous. Also **skip the next "move to Internal testing"** step, because the task is not yet considered finished from a billing standpoint.
@@ -1036,9 +1081,13 @@ Followed by a short status block:
 ```
 Time cursor: <TIME_CURSOR_SOURCE>           e.g. "last_timelog @ 10:50"
                                             or  "skill start (first log of day)"
-Attachments skipped (size): <list or none>
-Board moves disabled for projects: <list or none>
+Timelogs skipped (cursor caught up with now): <list from SKIPPED_TIMELOGS or none>
+Timelogs clamped to fit before now:           <list from CLAMPED_TIMELOGS or none>
+Attachments skipped (size):                   <list or none>
+Board moves disabled for projects:            <list or none>
 ```
+
+When `SKIPPED_TIMELOGS` is non-empty, also print a short paragraph telling the user **why** those entries did not land in Teamwork (the cursor reached `now()` mid-run, typically because the model produces work faster than wall-clock) and suggest they either re-run later (the cursor will continue from the last successful log) or fill those minutes in manually. The skipped tasks' board cards were **not** moved to *Internal testing* either — they will be moved on the next run that successfully logs them.
 
 The push reminder is intentionally **not** printed here — it moves to Step 9, after the optional verification handoff, so the user sees test results before they decide whether to push.
 

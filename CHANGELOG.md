@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.2] - 2026-05-27
+
+Future-timestamp guard for the session time cursor. On a fast run the model
+produces work much faster than wall-clock time, so the cursor (which only
+advances by *logged* minutes) drifts ahead of `now()` and the next POST writes
+a timelog with a start/end in the future. Teamwork accepts those entries
+silently, but the resulting timesheet is useless for billing.
+
+### Added
+
+- **Step 6.6.1 "Future-timestamp guard"** in `SKILL.md` — before each timelog
+  POST, the skill now caps `DURATION_MIN` to the remaining `HEADROOM_MIN`
+  (= floor distance from the cursor to `now()` in `ROUND` increments). If the
+  cursor has already caught up with `now()`, the POST is skipped, the cursor is
+  not advanced, and the board move to *Internal testing* is also skipped.
+- **`SKIPPED_TIMELOGS` and `CLAMPED_TIMELOGS` accounting arrays** rendered in
+  the Step 7 final summary, with a short paragraph telling the user why those
+  entries did not land (so they can re-run later or fill the minutes in
+  manually).
+
+### Why
+
+The Step 5.5 *no-future-timestamps* safeguard only ran at cursor
+initialization — it did nothing about subsequent drift. Documented user-visible
+bug: an 8-task run starting at 12:00 logged its last entry ending at 16:00
+while the wall clock was at 13:33. The guard closes that gap at the source.
+
+---
+
 ## [1.1.1] - 2026-05-27
 
 Implement → verify in a single command. When the companion `teamwork-task-test`
