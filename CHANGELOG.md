@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.1] - 2026-05-27
+
+Implement → verify in a single command. When the companion `teamwork-task-test`
+plugin is installed, this skill now hands off to it at the very end of the
+worker loop so each task's acceptance criteria get individually verified before
+the user pushes.
+
+### Added
+
+- **`auto_run_tests_after`** config key (default `true`) — at the end of Step 7
+  (after the implementation summary), the skill detects whether the
+  `teamwork-task-test` skill is available and, if so, invokes it via the `Skill`
+  tool with the original Teamwork URL. The verification skill's per-task and
+  tasklist reports are rendered inline before the final push reminder, so the
+  user sees the QA verdict before deciding to push.
+- **`--test-after=true|false`** CLI flag to override the config for the current
+  run only.
+- **Test skill detection** is best-effort and silent — the available-skills list
+  is consulted first, with a filesystem check under `~/.claude/plugins/**/
+  teamwork-task-test/SKILL.md` as a fallback. If neither signal confirms the
+  skill is installed, a single-line tip is printed pointing at
+  `/plugin install teamwork-task-test@wame` and the run ends cleanly.
+- **`Skill` added to `allowed-tools`** so the test skill can be invoked from
+  within this skill's execution context.
+
+### Changed
+
+- The "push manually when ready" reminder moved from the end of Step 7 to a
+  dedicated Step 9, so the verification output (Step 8) lands *before* the push
+  prompt — the user sees test results, then decides about pushing.
+- Config migration banner now says *"config migrated to 1.1.1 schema"* when any
+  key was added by the idempotent `jq` merge.
+
+### Compatibility
+
+- Fully backward compatible. Users on 1.1.0 who do not install
+  `teamwork-task-test` see exactly the same behaviour as before, plus the one
+  tip line at the end. The new config key is added silently on first run by the
+  existing migration step.
+
+---
+
 ## [1.1.0] - 2026-05-27
 
 Context-rich runs, smart gating, and board-aware automation. The skill now pulls

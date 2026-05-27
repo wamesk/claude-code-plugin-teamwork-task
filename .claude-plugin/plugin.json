@@ -1,7 +1,7 @@
 {
   "name": "teamwork-task",
-  "version": "1.1.0",
-  "description": "Fetch Teamwork.com tasklist/task by URL, implement each task in the current repo, commit per task using TYPE(scope): Message convention, and log time back to Teamwork. Pulls task attachments and comments, auto-moves the task across the board (In progress → Internal testing), gates risky commits for review, and writes sequential time logs that pick up where your last Teamwork timelog ended.",
+  "version": "1.1.1",
+  "description": "Fetch Teamwork.com tasklist/task by URL, implement each task in the current repo, commit per task using TYPE(scope): Message convention, and log time back to Teamwork. Pulls task attachments and comments, auto-moves the task across the board (In progress → Internal testing), gates risky commits for review, and writes sequential time logs that pick up where your last Teamwork timelog ended. When the companion `teamwork-task-test` plugin is installed, auto-invokes it at the end of the run so each task's acceptance criteria get individually verified before push.",
   "author": {
     "name": "Stanislav Červeňák",
     "email": "info@wame.sk"

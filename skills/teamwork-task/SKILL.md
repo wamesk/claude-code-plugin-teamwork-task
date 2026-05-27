@@ -1,9 +1,9 @@
 ---
 name: teamwork-task
-version: 1.1.0
-description: "Use when the user provides a Teamwork.com URL (tasklist or task) and asks to 'work on these tasks', 'urob tasky z teamworku', 'spracuj tasky z teamwork', 'vypracuj tasky z teamworku', or invokes '/teamwork-task'. Fetches tasks via the Teamwork REST API (v3), pulls task description, attachments, comments (when needed), and file comments for context, implements them one by one in the current repository, moves the task on the board (In progress → Internal testing, with fallback to Testing), commits per task using the TYPE(scope)[<task-id>]: Message convention, and logs time back to Teamwork as sequential, non-overlapping 5-min-aligned entries that pick up from your last timelog of the day. Configurable safety gate asks for review when the diff touches UI/template files or grows beyond 100 lines. Pauses and asks the user via AskUserQuestion on blockers."
-argument-hint: "<teamwork-url> [--time-mode=real_rounded_5m|ask] [--branching=current_branch|new_feature_branch] [--plan-mode=overview|per_task|none] [--auto-commit=always|when_safe|never]"
-allowed-tools: [Bash, Read, Write, Edit, Grep, Glob, AskUserQuestion]
+version: 1.1.1
+description: "Use when the user provides a Teamwork.com URL (tasklist or task) and asks to 'work on these tasks', 'urob tasky z teamworku', 'spracuj tasky z teamwork', 'vypracuj tasky z teamworku', or invokes '/teamwork-task'. Fetches tasks via the Teamwork REST API (v3), pulls task description, attachments, comments (when needed), and file comments for context, implements them one by one in the current repository, moves the task on the board (In progress → Internal testing, with fallback to Testing), commits per task using the TYPE(scope)[<task-id>]: Message convention, and logs time back to Teamwork as sequential, non-overlapping 5-min-aligned entries that pick up from your last timelog of the day. Configurable safety gate asks for review when the diff touches UI/template files or grows beyond 100 lines. When the companion `teamwork-task-test` skill is installed, hands off to it at the very end so each task's acceptance criteria get individually verified before the user pushes. Pauses and asks the user via AskUserQuestion on blockers."
+argument-hint: "<teamwork-url> [--time-mode=real_rounded_5m|ask] [--branching=current_branch|new_feature_branch] [--plan-mode=overview|per_task|none] [--auto-commit=always|when_safe|never] [--test-after=true|false]"
+allowed-tools: [Bash, Read, Write, Edit, Grep, Glob, AskUserQuestion, Skill]
 ---
 
 # Teamwork Task Worker
@@ -145,12 +145,15 @@ jq '
     "done_stage": "Internal testing",
     "done_stage_fallbacks": ["Testing"],
     "match_mode": "case_insensitive"
-  })
+  }) |
+  (.auto_run_tests_after //= true)
 ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
 chmod 600 "$CONFIG_FILE"
 ```
 
-The migration is idempotent — running it twice produces the same file. Do not print the config to stdout; only mention "config migrated to 1.1.0 schema" once if any change was made.
+The migration is idempotent — running it twice produces the same file. Do not print the config to stdout; only mention "config migrated to 1.1.1 schema" once if any change was made.
+
+The new `auto_run_tests_after` key (added in 1.1.1) controls whether this skill, on a clean finish, hands off to `/teamwork-task-test` to verify the acceptance criteria of every implemented task. Default is `true`. Disable per run with `--test-after=false`.
 
 ---
 
@@ -1037,9 +1040,82 @@ Attachments skipped (size): <list or none>
 Board moves disabled for projects: <list or none>
 ```
 
-Then a short reminder:
+The push reminder is intentionally **not** printed here — it moves to Step 9, after the optional verification handoff, so the user sees test results before they decide whether to push.
+
+---
+
+## Step 8 — Auto-run `/teamwork-task-test` (optional handoff)
+
+If `config.auto_run_tests_after == true` (default, added in 1.1.1) and the user did not pass `--test-after=false`, hand off to the `/teamwork-task-test` skill for per-criterion verification.
+
+**Why this exists.** The implementation phase produces a passing build and a commit per task, but it does not — by itself — prove that each *acceptance criterion* of the original Teamwork task was actually met. The companion `teamwork-task-test` skill exists precisely for that: it parses each acceptance criterion out of the task description, maps it onto the project's existing tests, runs them, drives a browser via the chrome-devtools MCP for UI-shaped criteria, and writes manual scenarios for whatever cannot be automated. Calling it automatically at the end closes the implement → verify loop in a single command.
+
+### 8.1 — Detect whether the test skill is available
+
+The `teamwork-task-test` skill is published on the same WAME marketplace. Two signals tell us if it is currently installed in this session:
+
+1. **The Skill tool's available-skills list** — when invoked via the `Skill` tool, only listed skill names succeed. The model can see this list in the session's system-reminder messages. If `teamwork-task-test` appears there, it is installed.
+2. **Filesystem fallback** — check for an installed skill folder under the plugins cache:
+   ```bash
+   if ls "$HOME/.claude/plugins"/*/teamwork-task-test/SKILL.md >/dev/null 2>&1 \
+      || ls "$HOME/.claude/plugins"/*/skills/teamwork-task-test/SKILL.md >/dev/null 2>&1; then
+     TEST_SKILL_INSTALLED=1
+   else
+     TEST_SKILL_INSTALLED=0
+   fi
+   ```
+
+If neither signal confirms availability, print a single-line tip and end the run:
+
+```
+ℹ Tip: install /teamwork-task-test to automatically verify acceptance criteria after each implementation.
+   /plugin install teamwork-task-test@wame
+```
+
+Do **not** treat this as an error — the user may have intentionally chosen not to install the verification skill.
+
+### 8.2 — Skip when nothing to verify
+
+If every task in the run ended in *aborted*, *skipped*, or had a failed time log (`TIMELOG_OK == 0`), there is nothing meaningful to verify. Print one line ("No completed tasks in this run — skipping verification.") and proceed to Step 9.
+
+Otherwise, build the argument string from the originally-parsed URL plus a few sensible overrides:
+
+```
+ORIG_URL="<the URL the user passed to /teamwork-task>"
+TEST_ARGS="$ORIG_URL --time-log=true --language=${DEFAULT_LANG:-sk}"
+```
+
+We pass `--time-log=true` explicitly so QA work continues the same sequential, non-overlapping time cursor that the implementation phase just advanced — both skills resolve the cursor via the **last Teamwork timelog of the day**, so the test skill's first log automatically starts where the implementation phase's last log ended (no gaps, no overlaps, no manual handover).
+
+### 8.3 — Invoke the test skill
+
+Use the `Skill` tool:
+
+```
+Skill(skill: "teamwork-task-test", args: "<TEST_ARGS>")
+```
+
+The invocation is **synchronous** in the model's perspective — the test skill's full per-task report (its Step 7) and tasklist summary (its Step 8) are rendered inline before control returns. There is no need to re-print anything in this skill — the user sees the verification output as the closing section of the run.
+
+### 8.4 — Failure handling
+
+The verification skill can finish with any of these outcomes:
+
+- **All ✅** — everything verified, nothing to do.
+- **Some ❌** — one or more acceptance criteria failed under a real test. The implementation phase already committed; do **not** auto-revert. Surface the failures clearly (the test skill already does this) and let the user decide whether to write a fix-up commit before pushing.
+- **Some 📋 / 📝** — manual scenarios were written or criteria were proposed. No action needed — the user reads them and runs the manual checks themselves.
+
+If the `Skill` tool call itself errors (transient MCP issue, skill not loadable), report it on one line and continue to Step 9 — the user has not lost anything; they can re-run `/teamwork-task-test <url>` manually.
+
+---
+
+## Step 9 — Final push reminder
+
+After Step 7's summary and Step 8's optional verification handoff:
+
 > **Push manually when ready:** `git push` (or `git push -u origin <branch>` for a new feature branch).
 > Time logs were written to Teamwork for each task; cards were moved on the board per project configuration.
+> If the verification step reported any ❌ failures, consider fixing those first before pushing.
 
 ---
 

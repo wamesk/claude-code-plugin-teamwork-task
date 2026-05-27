@@ -53,5 +53,7 @@
   "default_language": "sk",
   "auto_complete_finished_tasks": false,
   "skip_completed_tasks": true,
-  "is_billable_by_default": true
+  "is_billable_by_default": true,
+
+  "auto_run_tests_after": true
 }
