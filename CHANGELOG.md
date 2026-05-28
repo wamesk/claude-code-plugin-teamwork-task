@@ -7,6 +7,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.3] - 2026-05-28
+
+**Ask before assuming.** Two new gates in front of the worker loop close the
+"the skill produced code against a synthetic placeholder while the real input
+was sitting in the project folder" failure mode that surfaced on a real run
+(tasklist [#3335436](https://wame.teamwork.com/app/tasklists/3335436/list) —
+Tatra banka bmail import). The fix is two-fold: scan the cwd for unattached
+context, and react to the task body's own warnings.
+
+### Added
+
+- **Step 3.10 — Local working-tree discovery.** After the Teamwork attachments
+  are fetched (Steps 3.7–3.9), the skill now scans the project root
+  (configurable depth + dirs + extensions) for files whose names overlap with
+  the tasklist/task keywords (`vzor`, `dnr`, `sample`, `specifikác`, project
+  name like `Strečnianska/`, …). Matches are offered to the user via
+  **AskUserQuestion** with multi-select; picked files are read inline
+  (`pandoc`/`textutil` for `.docx`, `pdftotext` for `.pdf`, `xlsx2csv`/`in2csv`
+  for `.xlsx`) and become part of the per-task `context_files` array consumed
+  by Step 6.2. Fall-back: even when disabled, runs if any task description
+  mentions a filename pattern but no attachment was downloaded.
+- **Step 6.0 — Readiness gate (per task).** Before the timer starts for each
+  task, the description + comments are scanned against a configurable list of
+  "blocked-by-external-input" phrases (`pred začatím vyžiadať`, `bez vzorky
+  nemá zmysel`, `prisľúbené`, `⏳`, `waiting for client`, …). On a hit the
+  skill stops and asks the user, offering: (1) point me at the input now —
+  reuses Step 3.10 results plus free-text; (2) proceed with a synthetic
+  placeholder, but prefix the time-log description with `⚠️` and append a
+  `Synthetic-Input:` trailer to the commit body for later grep; (3) skip the
+  task — no commit, no log, no board move; (4) cancel the run.
+- **Plan template now renders two new rows per task** — `Context files
+  (local)` (output of Step 3.10) and `Missing inputs` (gating phrases or
+  filename hints without a matching file). If any task has a non-empty
+  `Missing inputs` row, the plan-approval question grows an *"I have the
+  input — let me paste a path"* option.
+- **Two new config keys, both default-on:** `local_context_discovery`
+  (object with `enabled/max_depth/scan_dirs/extensions/filename_hints/ignore_globs/min_keyword_score/max_files_to_offer`)
+  and `readiness_gate` (object with `enabled/patterns/filename_hint_pattern/on_block_default`).
+  Defaults match the patterns that produced the original failure so existing
+  users get the new behaviour without touching their config.
+- **Two new CLI flags:** `--local-discovery=true|false` and
+  `--readiness-gate=true|false`.
+- **Filename-hint fall-through in Step 3.7** — if a task description mentions
+  a filename (regex `[A-Za-z0-9_-]+\.(docx|pdf|xlsx|eml|msg|csv|sql|md|json|txt)`)
+  but the task ended with zero downloaded attachments, set `FILENAME_HINT_PRESENT=1`
+  for the session so Step 3.10 runs **even if local discovery is disabled in
+  config**. Somebody clearly referenced a file; assume it just lives outside
+  Teamwork rather than ignoring it.
+
+### Why
+
+A real run on tasklist #3335436 went like this: Task 44740924
+("Rozpoznanie obsahu notifikácie z Tatra banky") explicitly said *"Pred
+začatím vyžiadať reálny vzor notifikácie od klienta. Bez vzorky nemá zmysel
+písať regex."* The skill blew past that sentence and shipped a parser against
+a fixture invented from the DNR description. Meanwhile,
+`Strečnianska/Bmail o pohybe na ucte - vzor.docx` was sitting one directory
+above the cwd — never attached to the task, never noticed by the skill. The
+v1.1.2 architecture had no mechanism to either (a) read the gating sentence
+or (b) discover the local file. v1.1.3 adds both.
+
+### Side effects on other steps
+
+- **Step 6.2.5** auto-proposed test fixtures must use a `*_synthetic.*`
+  suffix when the readiness gate's "proceed anyway" path was taken, so a
+  reviewer can grep the fixtures and see immediately which ones are
+  filler.
+- **Step 6.8** time-log description gets the `⚠️ Implementované so
+  syntetickou náhradou` prefix on the same path. The log still
+  contributes to the running cursor so subsequent logs stay sequential.
+- **SKILL.md frontmatter version was 1.1.1 even after 1.1.2 shipped** —
+  this release brings it into sync with `plugin.json` at `1.1.3`.
+
+### Compatibility
+
+- Existing config files automatically gain the new keys via the idempotent
+  Step 2.6 migration; nothing the user previously set is touched.
+- Users who explicitly want the v1.1.2 silent-barrel-through behaviour can
+  set `"local_context_discovery": {"enabled": false}` and
+  `"readiness_gate": {"enabled": false}`, or pass both `--local-discovery=false
+  --readiness-gate=false` on a single run.
+
+---
+
 ## [1.1.2] - 2026-05-27
 
 Future-timestamp guard for the session time cursor. On a fast run the model

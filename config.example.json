@@ -55,5 +55,38 @@
   "skip_completed_tasks": true,
   "is_billable_by_default": true,
 
-  "auto_run_tests_after": true
+  "auto_run_tests_after": true,
+
+  "local_context_discovery": {
+    "enabled": true,
+    "max_depth": 3,
+    "scan_dirs": [".", "docs", "specs", "samples", "Strečnianska"],
+    "extensions": ["docx", "pdf", "md", "txt", "eml", "msg", "csv", "xlsx", "sql", "json", "html"],
+    "filename_hints": ["vzor", "sample", "dnr", "specifikác", "otazky", "q&a", "podklad", "priloh", "attachment"],
+    "ignore_globs": [".git/**", "vendor/**", "node_modules/**", "storage/**", ".claude/**", "public/**", "bootstrap/cache/**", ".idea/**", ".vscode/**", "teamwork-task-*/**"],
+    "min_keyword_score": 1,
+    "max_files_to_offer": 12,
+    "doc_converters": {
+      "docx": "auto",
+      "pdf": "auto",
+      "xlsx": "auto"
+    }
+  },
+
+  "readiness_gate": {
+    "enabled": true,
+    "patterns": [
+      "pred[[:space:]]+začatím[[:space:]]+vyžiadať",
+      "bez[[:space:]]+(vzor|sample|fixture|údajov|dát|prílohy|prikladu)[[:space:]]+(nemá[[:space:]]+zmysel|nie[[:space:]]+je[[:space:]]+možné)",
+      "vyžiadať[[:space:]]+(reálny[[:space:]]+)?(vzor|sample|prílohu)",
+      "waiting[[:space:]]+for[[:space:]]+(client|customer|stakeholder|sample)",
+      "requires[[:space:]]+(real|production)[[:space:]]+(sample|data|fixture)",
+      "prisľúbené",
+      "pending[[:space:]]+from",
+      "blocked[[:space:]]+by",
+      "⏳"
+    ],
+    "filename_hint_pattern": "[A-Za-z0-9_-]+\\.(docx|pdf|xlsx|eml|msg|csv|sql|md|json|txt)\\b",
+    "on_block_default": "ask"
+  }
 }

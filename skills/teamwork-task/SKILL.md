@@ -1,7 +1,7 @@
 ---
 name: teamwork-task
-version: 1.1.1
-description: "Use when the user provides a Teamwork.com URL (tasklist or task) and asks to 'work on these tasks', 'urob tasky z teamworku', 'spracuj tasky z teamwork', 'vypracuj tasky z teamworku', or invokes '/teamwork-task'. Fetches tasks via the Teamwork REST API (v3), pulls task description, attachments, comments (when needed), and file comments for context, implements them one by one in the current repository, moves the task on the board (In progress → Internal testing, with fallback to Testing), commits per task using the TYPE(scope)[<task-id>]: Message convention, and logs time back to Teamwork as sequential, non-overlapping 5-min-aligned entries that pick up from your last timelog of the day. Configurable safety gate asks for review when the diff touches UI/template files or grows beyond 100 lines. When the companion `teamwork-task-test` skill is installed, hands off to it at the very end so each task's acceptance criteria get individually verified before the user pushes. Pauses and asks the user via AskUserQuestion on blockers."
+version: 1.1.3
+description: "Use when the user provides a Teamwork.com URL (tasklist or task) and asks to 'work on these tasks', 'urob tasky z teamworku', 'spracuj tasky z teamwork', 'vypracuj tasky z teamworku', or invokes '/teamwork-task'. Fetches tasks via the Teamwork REST API (v3), pulls task description, attachments, comments (when needed), and file comments for context, **scans the local working tree for unattached specs / samples / DNR docs that match the task keywords and asks the user whether to use them**, **detects gating phrases in the task body (e.g. 'Bez vzorky nemá zmysel písať regex') and pauses with a question before implementing instead of barreling through with synthetic data**, implements tasks one by one in the current repository, moves the task on the board (In progress → Internal testing, with fallback to Testing), commits per task using the TYPE(scope)[<task-id>]: Message convention, and logs time back to Teamwork as sequential, non-overlapping 5-min-aligned entries that pick up from your last timelog of the day. Configurable safety gate asks for review when the diff touches UI/template files or grows beyond 100 lines. When the companion `teamwork-task-test` skill is installed, hands off to it at the very end so each task's acceptance criteria get individually verified before the user pushes. Pauses and asks the user via AskUserQuestion on blockers."
 argument-hint: "<teamwork-url> [--time-mode=real_rounded_5m|ask] [--branching=current_branch|new_feature_branch] [--plan-mode=overview|per_task|none] [--auto-commit=always|when_safe|never] [--test-after=true|false]"
 allowed-tools: [Bash, Read, Write, Edit, Grep, Glob, AskUserQuestion, Skill]
 ---
@@ -32,6 +32,9 @@ Optional flags (override config for this run only — not persisted):
 - `--branching=current_branch` | `--branching=new_feature_branch`
 - `--plan-mode=overview` | `--plan-mode=per_task` | `--plan-mode=none`
 - `--auto-commit=always` | `--auto-commit=when_safe` | `--auto-commit=never`
+- `--local-discovery=true|false` — scan the working tree for unattached spec/sample files matching task keywords (default `true`, see Step 3.10)
+- `--readiness-gate=true|false` — pause with a question when a task body says it needs an external input that may not yet be available (default `true`, see Step 6.0)
+- `--test-after=true|false` — hand off to `/teamwork-task-test` after a clean finish (default `true`)
 
 If `$ARGUMENTS` is empty or does not contain a URL, ask the user via **AskUserQuestion** for the Teamwork URL before doing anything else.
 
@@ -146,14 +149,49 @@ jq '
     "done_stage_fallbacks": ["Testing"],
     "match_mode": "case_insensitive"
   }) |
-  (.auto_run_tests_after //= true)
+  (.auto_run_tests_after //= true) |
+  (.local_context_discovery //= {
+    "enabled": true,
+    "max_depth": 3,
+    "scan_dirs": [".", "docs", "specs", "samples", "Strečnianska"],
+    "extensions": ["docx","pdf","md","txt","eml","msg","csv","xlsx","sql","json","html"],
+    "filename_hints": ["vzor","sample","dnr","specifikác","otazky","q&a","podklad","priloh","attachment"],
+    "ignore_globs": [".git/**","vendor/**","node_modules/**","storage/**",".claude/**","public/**","bootstrap/cache/**",".idea/**",".vscode/**","teamwork-task-*/**"],
+    "min_keyword_score": 1,
+    "max_files_to_offer": 12,
+    "doc_converters": {
+      "docx": "auto",
+      "pdf": "auto",
+      "xlsx": "auto"
+    }
+  }) |
+  (.readiness_gate //= {
+    "enabled": true,
+    "patterns": [
+      "pred[[:space:]]+začatím[[:space:]]+vyžiadať",
+      "bez[[:space:]]+(vzor|sample|fixture|údajov|dát|prílohy|prikladu)[[:space:]]+(nemá[[:space:]]+zmysel|nie[[:space:]]+je[[:space:]]+možné)",
+      "vyžiadať[[:space:]]+(reálny[[:space:]]+)?(vzor|sample|prílohu)",
+      "waiting[[:space:]]+for[[:space:]]+(client|customer|stakeholder|sample)",
+      "requires[[:space:]]+(real|production)[[:space:]]+(sample|data|fixture)",
+      "prisľúbené",
+      "pending[[:space:]]+from",
+      "blocked[[:space:]]+by",
+      "⏳"
+    ],
+    "filename_hint_pattern": "[A-Za-z0-9_-]+\\.(docx|pdf|xlsx|eml|msg|csv|sql|md|json|txt)\\b",
+    "on_block_default": "ask"
+  })
 ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
 chmod 600 "$CONFIG_FILE"
 ```
 
-The migration is idempotent — running it twice produces the same file. Do not print the config to stdout; only mention "config migrated to 1.1.1 schema" once if any change was made.
+The migration is idempotent — running it twice produces the same file. Do not print the config to stdout; only mention "config migrated to 1.1.3 schema" once if any change was made.
 
-The new `auto_run_tests_after` key (added in 1.1.1) controls whether this skill, on a clean finish, hands off to `/teamwork-task-test` to verify the acceptance criteria of every implemented task. Default is `true`. Disable per run with `--test-after=false`.
+The `auto_run_tests_after` key (added in 1.1.1) controls whether this skill, on a clean finish, hands off to `/teamwork-task-test` to verify the acceptance criteria of every implemented task. Default is `true`. Disable per run with `--test-after=false`.
+
+The `local_context_discovery` key (added in 1.1.3) controls Step 3.10 — scanning the working tree for unattached specs / samples that the user dropped into the project folder but did not attach to the Teamwork task. Default is `true`. Disable per run with `--local-discovery=false`.
+
+The `readiness_gate` key (added in 1.1.3) controls Step 6.0 — detecting phrases in the task description that mark an external blocker (e.g. *"Bez vzorky nemá zmysel písať regex"*) and pausing with **AskUserQuestion** before implementing, so the skill does not silently produce code against synthetic placeholders. Default is `true`. Disable per run with `--readiness-gate=false`.
 
 ---
 
@@ -370,6 +408,17 @@ done < <(echo "$FILES_JSON" | jq -c '.files[]? // .data[]? // empty')
 
 If neither endpoint shape returns a file list, log a single line warning and continue without attachments.
 
+**Filename hint fall-through.** If the task description (or any fetched
+comment) mentions a filename or extension (regex from
+`config.readiness_gate.filename_hint_pattern`, e.g. `vzor.docx`,
+`prilohy.pdf`, `data.xlsx`) **and** the task ended up with zero downloaded
+attachments, set an in-memory flag `FILENAME_HINT_PRESENT=1` for this task.
+That flag forces Step 3.10 (local working-tree discovery) to run for this
+task **even if `local_context_discovery.enabled` is false** — somebody clearly
+referenced a file; either it was attached to the wrong task, lives in the
+project folder, or is still on the way. Pretending it doesn't exist is the
+worst outcome.
+
 ### Step 3.8 — Fetch comment attachments
 
 For each comment fetched in Step 3.5, iterate its `files` / `attachments` array and download to a `comments/` subdirectory inside `$ATTACH_DIR`:
@@ -414,6 +463,130 @@ curl -sS -u "$AUTH" -H "Accept: application/json" \
 
 Render in the plan as *"File comments on <filename>: 2 — <last comment digest>"*. Keep it terse — full comment bodies clutter the plan.
 
+### Step 3.10 — Local working-tree discovery
+
+Tasks frequently reference materials that live in the **project folder**
+rather than as Teamwork attachments — client-shared DNR / Q&A docs in a
+project-named directory (e.g. `Strečnianska/DNR_Strecnianska_v1.2.docx`),
+sample emails dropped in `samples/`, reference exports in `docs/`, SQL dumps
+in `dáta db/`. Without this step the skill would happily run with a synthetic
+fixture for a task that says *"vzor doručí klient"*, even though
+`Strečnianska/Bmail o pohybe na ucte - vzor.docx` was sitting one directory
+above the cwd the whole time. v1.1.3 closes that gap.
+
+This step runs **once per session** (not per task) when:
+- `config.local_context_discovery.enabled == true` (default), OR
+- any task in the list set `FILENAME_HINT_PRESENT=1` in Step 3.7 (the
+  fall-through that fires when a description names a file but no attachment
+  was downloaded).
+
+```bash
+LCD_ENABLED=$(jq -r '.local_context_discovery.enabled // true' "$CONFIG_FILE")
+
+# Honour the fall-through from Step 3.7 even when explicitly disabled.
+if [ "$LCD_ENABLED" != "true" ] && [ "${FILENAME_HINT_PRESENT_ANY:-0}" != "1" ]; then
+  echo "  ℹ Local context discovery disabled — skipping working-tree scan." >&2
+else
+  MAX_DEPTH=$(jq -r '.local_context_discovery.max_depth // 3' "$CONFIG_FILE")
+  MIN_SCORE=$(jq -r '.local_context_discovery.min_keyword_score // 1' "$CONFIG_FILE")
+  MAX_OFFER=$(jq -r '.local_context_discovery.max_files_to_offer // 12' "$CONFIG_FILE")
+
+  # Keyword set: tasklist name + every task name + every filename hint from descriptions.
+  KEYWORDS=$(jq -r '
+    [.tasklist.name, (.tasks[]?.name), (.tasks[]?.description // "")]
+    | join(" ")
+  ' "$CLAUDE_JOB_DIR/tasks.json" 2>/dev/null \
+    | tr '[:upper:]' '[:lower:]' \
+    | tr -dc '[:alnum:]áäčďéíľĺňóôŕšťúýž _\n' \
+    | tr ' ' '\n' \
+    | awk 'length($0) >= 4' \
+    | sort -u)
+
+  # Build the find expression from configured extensions + filename hints.
+  EXTS=$(jq -r '.local_context_discovery.extensions[]' "$CONFIG_FILE")
+  HINTS=$(jq -r '.local_context_discovery.filename_hints[]' "$CONFIG_FILE")
+
+  FIND_EXTS=""
+  for E in $EXTS; do FIND_EXTS="$FIND_EXTS -iname '*.${E}' -o"; done
+  for H in $HINTS; do FIND_EXTS="$FIND_EXTS -iname '*${H}*' -o"; done
+  FIND_EXTS="${FIND_EXTS% -o}"
+
+  IGNORE_EXPR=""
+  while IFS= read -r G; do
+    [ -n "$G" ] && IGNORE_EXPR="$IGNORE_EXPR -not -path './${G}'"
+  done < <(jq -r '.local_context_discovery.ignore_globs[]' "$CONFIG_FILE")
+
+  # Collect candidates (limit depth, filter out junk paths).
+  CANDIDATES=$(eval "find . -maxdepth $MAX_DEPTH -type f $IGNORE_EXPR \\( $FIND_EXTS \\) -print 2>/dev/null" \
+    | sort -u)
+
+  # Score each candidate by keyword overlap (filename + parent dir tokens ∩ KEYWORDS).
+  SCORED_FILE="$CLAUDE_JOB_DIR/local_discovery.tsv"
+  : > "$SCORED_FILE"
+  while IFS= read -r PATHCAND; do
+    [ -z "$PATHCAND" ] && continue
+    TOKENS=$(echo "$PATHCAND" \
+      | tr '[:upper:]' '[:lower:]' \
+      | tr -dc '[:alnum:]áäčďéíľĺňóôŕšťúýž /._\n' \
+      | tr '/._' '\n' \
+      | awk 'length($0) >= 3' \
+      | sort -u)
+    SCORE=$(comm -12 <(printf '%s\n' "$TOKENS") <(printf '%s\n' "$KEYWORDS") | wc -l | tr -d ' ')
+    if [ "$SCORE" -ge "$MIN_SCORE" ]; then
+      MATCHES=$(comm -12 <(printf '%s\n' "$TOKENS") <(printf '%s\n' "$KEYWORDS") | paste -sd , -)
+      printf '%s\t%s\t%s\n' "$SCORE" "$PATHCAND" "$MATCHES" >> "$SCORED_FILE"
+    fi
+  done <<< "$CANDIDATES"
+
+  # Top N, sorted by score desc.
+  sort -k1,1nr "$SCORED_FILE" | head -n "$MAX_OFFER" > "${SCORED_FILE}.top"
+  TOP_COUNT=$(wc -l < "${SCORED_FILE}.top" | tr -d ' ')
+fi
+```
+
+If `TOP_COUNT == 0`, log a single line *"Local discovery: no plausible
+context files found"* and continue with no extra context. Do **not** ask.
+
+If `TOP_COUNT > 0`, render the list to the user via **AskUserQuestion**:
+
+> "Found local files that look related to this tasklist (not attached in
+>  Teamwork). Should I treat any of these as additional context?
+>
+>  - `Strečnianska/Bmail o pohybe na ucte - vzor.docx` (matches: bmail, vzor)
+>  - `Strečnianska/DNR_Strecnianska_v1.2.docx` (matches: DNR, Strečnianska)
+>  - `Strečnianska/dáta db/tenant_mysql_db_.sql` (matches: data, tenant)
+>  - …"
+
+Use a **multi-select** question (`multiSelect: true`) with one option per
+file plus two control options:
+- *Use all listed files as context*
+- *Use only the ones I pick* (multi-select rest)
+- *Ignore all — these are unrelated*
+- *Other* (free text — user may paste an absolute path the scan missed)
+
+For each picked file, attempt to inline its content into the per-task
+`context_files` array consumed by Step 6.2:
+
+| Extension     | Reader strategy                                                                                  |
+| ------------- | ------------------------------------------------------------------------------------------------ |
+| `.md`/`.txt`/`.csv`/`.sql`/`.json`/`.yaml`/`.html`/`.xml` | `Read` directly (plain text).                              |
+| `.docx`       | `pandoc -t plain "$F"` if installed; else macOS `textutil -convert txt -stdout "$F"`; else fall back to filename-only with a one-line warning *"install pandoc for inline .docx content"*. |
+| `.pdf`        | `pdftotext "$F" -` if installed; else filename-only warning.                                     |
+| `.xlsx`       | `xlsx2csv "$F" -` if installed; else `in2csv` (csvkit); else filename-only warning.              |
+| `.eml`/`.msg` | `Read` raw; treat headers + body as plain text.                                                  |
+| Anything else | Add filename to context but warn it cannot be opened inline.                                     |
+
+The set of picked files is then surfaced in the plan (Step 4) under a
+`**Context files (local):**` line per task, so the human can see the skill
+acknowledged them before approving.
+
+**Bash-3.2 / macOS note.** The `comm` invocation above relies on sorted
+input — never pipe `tr | sort -u | comm` without a sort step in between.
+The find expression eval'd from a string is intentional (allows the
+extension list to be config-driven); if the shell rejects it, fall back to
+a simpler hard-coded find over `*.docx *.pdf *.md *.txt` and print a
+warning.
+
 ---
 
 ## Step 4 — Plan overview + approval
@@ -439,10 +612,25 @@ For `overview`, render a concise markdown plan to stdout:
 **Comments context:** <skipped (description sufficient) | 3 comments — user clarified to use X over Y on 2026-05-20>
 **Attachments:** <none | 2 files: spec.md (3KB), mockup.png (180KB)>
 **File comments:** <skipped | 1 on mockup.png — "use #1A73E8 instead">
+**Context files (local):** <none | Strečnianska/DNR_Strecnianska_v1.2.docx, Strečnianska/Bmail o pohybe na ucte - vzor.docx>  ← from Step 3.10
+**Missing inputs:** <none | "Real Tatra banka notification sample" (BLOCKER — gating phrase in description) | "Final colour value" (SOFT — referenced in comment)>  ← from Step 3.10 (gap) + Step 6.0 patterns
 **Board target:** <In progress → Internal testing | In progress → Testing (fallback) | start only — no testing column | disabled — no workflow on this project>
 
 ### 2. [#<task-id>] ...
 ```
+
+The **`Missing inputs`** line is the single most important addition in v1.1.3 —
+it makes the plan honest about what the skill cannot guess. Sources:
+1. Any task whose description matched a `readiness_gate.patterns` regex.
+2. Any task with `FILENAME_HINT_PRESENT=1` but **no** matching file in
+   Step 3.10's results.
+3. Any comment that says *"⏳ čaká sa na X"* / *"pending X"*.
+
+If at least one task has a non-empty `Missing inputs` row, the plan-approval
+question gets one extra option:
+- *I have the input — let me paste a path or a short value* — opens a follow-up
+  question per blocked task so the user can attach a local path / pasted
+  snippet that the skill uses as `context_files` for that task only.
 
 Then ask the user via **AskUserQuestion**:
 
@@ -628,6 +816,108 @@ Three hard guarantees from this algorithm:
 ## Step 6 — Worker loop (per task)
 
 For each task in the (approved and possibly reordered) list, in order:
+
+### Step 6.0 — Readiness gate (per task)
+
+**Run this BEFORE Step 6.1 starts the timer.** v1.1.3 catches the case where a
+task body explicitly says it needs something that may not be in hand — the
+canonical example is *"Pred začatím vyžiadať reálny vzor notifikácie od
+klienta. Bez vzorky nemá zmysel písať regex."* The previous behaviour was to
+plow through with a synthetic placeholder; the new behaviour is to **ask**.
+
+Skip this step when `config.readiness_gate.enabled == false` or the user passed
+`--readiness-gate=false`.
+
+```bash
+RG_ENABLED=$(jq -r '.readiness_gate.enabled // true' "$CONFIG_FILE")
+[ "$RG_ENABLED" != "true" ] && { echo "  ℹ readiness gate disabled — skipping"; }
+
+if [ "$RG_ENABLED" = "true" ]; then
+  # Build one big haystack: task description + acceptance_criteria + final_summary
+  # + every comment body, lowercased and HTML-stripped.
+  HAYSTACK=$(printf '%s\n%s\n%s\n' \
+    "$TASK_DESCRIPTION_TEXT" \
+    "$ACCEPTANCE_CRITERIA_TEXT" \
+    "$FINAL_SUMMARY_TEXT" \
+    "$COMMENTS_CONCAT_TEXT" \
+    | tr '[:upper:]' '[:lower:]')
+
+  GATING_HIT=""
+  MATCHED_PHRASE=""
+  while IFS= read -r PAT; do
+    [ -z "$PAT" ] && continue
+    # `grep -E` with the configured POSIX-ERE pattern; first match wins.
+    if MATCH=$(echo "$HAYSTACK" | grep -oE "$PAT" | head -n1); then
+      if [ -n "$MATCH" ]; then
+        GATING_HIT=1
+        MATCHED_PHRASE="$MATCH"
+        break
+      fi
+    fi
+  done < <(jq -r '.readiness_gate.patterns[]' "$CONFIG_FILE")
+
+  if [ -n "$GATING_HIT" ]; then
+    # Re-use the local discovery results (Step 3.10) to offer specific files
+    # as candidate inputs. If discovery is empty for this task, just ask
+    # whether the user has the input as free text.
+    OFFERED=$(awk -F '\t' '{print }' "$CLAUDE_JOB_DIR/local_discovery.tsv.top" 2>/dev/null)
+    : # render AskUserQuestion (see options below)
+  fi
+fi
+```
+
+**The question** (only fires when `GATING_HIT` is set):
+
+> "Task [#<id>] **<title>** contains a gating phrase:
+>
+>  > *<MATCHED_PHRASE>*  (matched config.readiness_gate.patterns)
+>
+>  This usually means the task needs an external input (sample file, real
+>  data, client decision) before implementation makes sense. How do you want
+>  to proceed?"
+
+Options (single-select):
+
+1. **Yes — I have it, point me at it.**
+   Opens a follow-up question listing the Step 3.10 local-discovery results
+   for this task as multi-select options, plus an *Other* free-text field
+   where the user can paste an absolute path, a URL, or a literal snippet.
+   The picked content goes into this task's `context_files` array (same
+   shape as Step 3.10 output) and the timer in Step 6.1 starts normally.
+
+2. **No — proceed with a synthetic placeholder (mark as needs-verify).**
+   Implementation continues, but:
+   - The plan entry's `Missing inputs` line is preserved into the per-task
+     internal notes.
+   - The time-log description (Step 6.8) is **prefixed** with `⚠️
+     Implementované so syntetickou náhradou — vyžaduje overenie po doručení
+     reálneho vkladu.` (Slovak default; English variant for
+     `default_language=en`).
+   - The auto-proposed test in Step 6.2.5 must use a fixture clearly named
+     `*_synthetic.*` (e.g. `tatra_credit_sample_synthetic.txt`) so a
+     reviewer immediately sees what is real and what is filler.
+   - A trailer line is appended to the **commit body**:
+     `Synthetic-Input: <one-line description of what was faked>`
+     so a future grep of `git log --all -i --grep='synthetic-input'`
+     surfaces every place that needs revisiting.
+
+3. **No — skip this task entirely.**
+   Record the task in the final summary as `⏭️ blocked — gating phrase
+   matched, no input provided`. **Do not** commit, **do not** log time,
+   **do not** move the board card. Continue to the next task.
+
+4. **Cancel the whole run.**
+   Stop the loop, no further commits / logs / board moves.
+
+If `plan_mode == per_task`, Step 6.0 fires **before** the per-task plan render
+so the gating decision is part of the same per-task approval — the user does
+not have to answer two separate questions back-to-back.
+
+**Why this matters.** A regex against a made-up email format is the kind of
+mistake that ships, lives in production for weeks, and only surfaces when a
+real bank notification fails to parse and a customer payment goes missing.
+The 30-second pause this gate introduces is cheaper than that incident by
+several orders of magnitude.
 
 ### 6.1 Start timer
 ```bash
