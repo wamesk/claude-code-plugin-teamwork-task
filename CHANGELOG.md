@@ -7,6 +7,232 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.3.0] - 2026-05-29
+
+**Tasklist filter: only "To Do" + me.** A single Teamwork project commonly
+holds tasks for two (or more) repositories and two (or more) people — a
+typical setup is a Laravel backend in one repo plus an Ionic / iOS frontend
+in another, each owned by a different developer. Up to v1.2.0, running
+`/teamwork-task <tasklist-url>` from the backend repo happily started
+implementing the frontend developer's tasks in the wrong codebase, with no
+warning. v1.3.0 closes that loop with an explicit board-column + assignee
+filter that runs automatically for tasklist URLs and gets out of the way for
+single-task URLs.
+
+### Added
+
+- **Step 3.45 — Tasklist filter (To Do + me).** For tasklist URLs only, the
+  skill fetches each task's current board stage (via the
+  `?include=cards,stages` shape on the tasklists endpoint) and current
+  assignees, then marks every task with one of:
+  - `process` — stage matches `tasklist_filter.todo_stage` (default `To Do`,
+    **case-sensitive** by default) AND assignees contain the current user.
+    The worker loop runs as in v1.2.x.
+  - `analyse_only` — fetched and rendered in the plan with a one-line
+    "Quick read" opinion, but the worker loop's Step 6.-1 gate skips
+    every mutation (no commit, no time log, no board move).
+  - `drop` — only when `analyze_all_tasks=false`; the task is removed from
+    the plan entirely.
+- **Step 6.-1 — Process-mode gate.** Runs before the readiness gate.
+  Analyse-only tasks `continue` past the worker loop without starting a
+  timer, writing a commit, posting a time log, or moving the board card.
+- **Step 2.7 — Resolve current user (cached for the whole run).** The
+  `/me.json` lookup that Step 5.5 used to do lazily for the time cursor is
+  now executed up front and cached so Step 3.45 can use it too. Empty
+  result is non-fatal — assignee check falls back to "skip" so a permission
+  glitch never silently locks the user out of their own tasklist.
+- **Config block `tasklist_filter`** with six tunables:
+  - `enabled` (default `true`).
+  - `todo_stage` (default `"To Do"`).
+  - `todo_stage_match_mode` (default `"case_sensitive"`; supports
+    `"case_insensitive"` for teams that mix casings).
+  - `only_assigned_to_me` (default `true`).
+  - `analyze_all_tasks` (default `true` — show teammates' tasks in the plan
+    as analyse-only; set `false` for strict mode where they are dropped).
+  - `skip_reason_render` (default `"inline"` — render the skip reason next
+    to the task in the plan).
+- **Three CLI flags** for per-run overrides: `--tasklist-filter=true|false`,
+  `--tasklist-todo-stage=<name>`, `--tasklist-only-mine=true|false`.
+- **Step 4 plan template — two-section layout.** Tasklist plans now split
+  into *"To implement"* and *"Analyse only — not implemented in this run"*.
+  Each analyse-only entry shows the skip reason (e.g.
+  `wrong_stage(In progress) + wrong_assignee`) and a 1–2 sentence "Quick
+  read" sanity-check.
+- **Two new plan-approval options:** *Promote an analyse-only task to
+  implement* and *Disable the tasklist filter for this run* — both
+  re-render the plan in place without forcing a re-fetch.
+- **Step 7 final summary** now lists `Tasklist filter` activity and
+  `Analyse-only tasks (not touched)` so the run report is honest about
+  what was and was not implemented.
+- **Step 3.45 empty-result message + Step 4.0a short-circuit prompt** —
+  when the tasklist filter ends up with `TF_COUNT_PROCESS == 0` (no
+  tasks survived the "To Do" + me check), the skill no longer renders
+  the normal six-option plan-approval question. Instead it prints a
+  detailed explanation of *which filter rules ran*, *per-task reasons*
+  for the top 10 skipped tasks, and *most common causes* (wrong stage
+  name, casing mismatch, all tasks assigned to teammates), then asks a
+  focused prompt: *Disable the filter for this run* / *Pick tasks from
+  the analyse-only list to implement* / *Change the required stage
+  name* / *Toggle the assignee check off* / *Cancel*. Solves the
+  "skill silently did nothing" confusion when the user assumes the
+  defaults match their team's column naming.
+- **`round_threshold_minutes` config key** (default `4`) — splits the
+  Step 6.6 rounding decision into two zones so short runs are billed
+  honestly in *both directions* (no padding short tasks up to 5, no
+  systematic over-billing of every long task to the next step). Elapsed
+  below the threshold logs as raw minutes (1, 2, 3); elapsed at or above
+  the threshold rounds to the **nearest** `time_rounding_minutes` step
+  using half-up integer rounding:
+  ```
+  4 → 5    7 → 5     11 → 10    13 → 15
+  5 → 5    8 → 10    12 → 10    14 → 15
+  6 → 5    9 → 10
+  ```
+  Set the threshold equal to `time_rounding_minutes` to recover the
+  pre-1.3.0 "always round up to ROUND" behaviour.
+- **Step 6.6 rewritten** to honour the new threshold — `DURATION_SOURCE`
+  is now exposed (`rounded_nearest`, `sub_round_elapsed`,
+  `floored_min_log`) and the sub-round path registers
+  `SUB_ROUND_TIMELOGS` with a reason ("elapsed below ${THRESHOLD}m
+  threshold") so Step 7 can explain why an entry is below 5 min.
+- **Step 6.6.1 simplified** — the clamp no longer re-rounds to ROUND. It
+  just clamps `DURATION_MIN` down to raw headroom when an overshoot is
+  about to happen, then flags the entry as sub-round with reason
+  "clamped by headroom guard". A round-up entry whose headroom is 7 min
+  used to be clamped to 5 (a 2-min loss); v1.3.0 logs the full 7 min and
+  the cursor stays accurate.
+- **Step 9.5 — Worktree handoff (merge / push / leave).** When the skill
+  runs inside a git worktree (typical for background jobs launched via
+  `EnterWorktree` or sessions started from `.claude/worktrees/<name>`),
+  every commit lands on the worktree's branch and never reaches `main`
+  on its own. Up to v1.2.0 the user had to remember to merge them by
+  hand; Step 10 cleanup would happily remove the worktree's parent
+  directory but never touched the merge. v1.3.0 closes that loop by
+  asking, at the end of the run, what to do with the new commits:
+  - *Merge into a target branch* (default — fast-forward if possible,
+    fall back to merge commit; target asked separately with parent /
+    main / custom options),
+  - *Push the worktree branch to `origin` for a PR*,
+  - *Leave as-is*,
+  - *Cherry-pick specific commits* (power option).
+  On a successful merge, both the worktree branch and the worktree
+  directory are removed by default, which chains into Step 10 cleanup
+  without re-asking.
+- **Step 5.1 — Detect worktree mode + cache parent branch.** New early
+  detection step that resolves `WT_RUN_IN_WORKTREE`, `WT_HEAD_BEFORE`
+  (HEAD before the worker loop, so Step 9.5 can compute "commits made
+  this run" only), and `WT_PARENT_BRANCH` (origin/HEAD with main /
+  master / trunk fallback). All cheap, no API calls.
+- **Config block `worktree_handoff`** with eight tunables: `enabled`
+  (default `true`), `default_action` (default `ask`; supports `merge`,
+  `push`, `leave`), `default_target` (default `ask`; supports `parent`,
+  `main`, `<branch>`), `merge_strategy` (default `ff_else_merge`;
+  supports `ff_only`, `no_ff`, `squash`), `delete_branch_after_merge`
+  (default `true`), `delete_worktree_after_merge` (default `true`),
+  `push_remote` (default `"origin"`), `skip_if_no_commits` (default
+  `true` — do not even ask when nothing was committed this run).
+- **Two new CLI flags:** `--worktree-handoff=ask|merge|push|leave` and
+  `--worktree-target=ask|parent|main|<branch>`.
+- **Step 10.2 deduplication** — if Step 9.5 already merged and removed
+  the current worktree, Step 10 filters it out of its discovery so the
+  user is not asked about the same worktree twice.
+
+### Why
+
+A real run on a multi-repo Teamwork project surfaced the failure: a
+developer running the skill from the Laravel repo expected only "their"
+backend tasks to be implemented. The skill instead grabbed every task in
+the tasklist, including the frontend ones marked for the iOS engineer,
+moved them to *In progress* on the board (visible to the whole team), and
+started writing PHP code for an iOS task description. The implementation
+phase eventually failed at the safety gate (the diff did not match the
+description), but by that point the board state had been wrongly mutated
+and the time logs were wasted. v1.3.0 narrows the implementation set to
+what the developer actually owns and is greenlit to work on, while still
+showing teammates' tasks for context so the developer can comment on them
+in standup.
+
+The `round_threshold_minutes` addition came from the opposite end of the
+honest-billing problem: v1.2.0 always rounded **up** to ≥ 5 min, which
+was wrong on both ends — a 30-second typo fix got logged as 5 minutes
+(embarrassing for a trivial commit), and an 11-minute hotfix got logged
+as 15 (a 36 % over-bill). The split-zone logic with round-**to-nearest**
+makes both ends honest: trivial work logs as 1–3 min raw; substantial
+work rounds in either direction (7 → 5, 8 → 10, 12 → 10, 13 → 15) so the
+billing grid averages out over many tasks instead of biasing upward
+every time.
+
+The Step 9.5 worktree handoff comes from a recurring pain point: a
+background run completes, commits land in `.claude/worktrees/<name>` on a
+branch like `claude/<task>` — and **none of it reaches `main`**. The user
+sees a clean Step 7 summary, walks away thinking the work is done, and
+discovers a week later (when reviewing `git log` on `main`) that the
+changes never made it home. The fix is structural: the skill that produced
+the commits is the right place to also place them in their final home, or
+to explicitly hand the decision back to the user before walking away. The
+end-of-run timing was chosen deliberately — by Step 9.5 the user has
+already seen the implementation summary and the test verification result
+in Step 7 + Step 8, so they have full context to decide whether the
+commits are ready for `main`, ready for a PR, or need further work before
+either.
+
+### Why case-sensitive "To Do"
+
+The existing board_workflow stage matcher is case-insensitive on purpose —
+"In progress" and "INTERNAL TESTING" are typical real-world variants and
+matching loosely keeps the configuration low-friction. The tasklist
+*filter* has the opposite stakes: a loose match would also accept
+"In progress" tasks (because both start with "I" / share two letters under
+some matchers) or, worse, accidentally accept a column literally named
+"Todo" that has a different meaning on a freeform Kanban board. Strict
+match means the user explicitly approves the column name they expect, and
+the default `"To Do"` matches the literal Teamwork column the user pointed
+at in the brief that drove this release. Users who want loose matching can
+flip `todo_stage_match_mode` to `case_insensitive`.
+
+### Why single-task URLs bypass
+
+When the user passes `/teamwork-task https://…/tasks/12345`, they have
+deliberately pointed at one task — typically because they want to debug it,
+re-run it after a fix, or run a task that lives outside the normal "To Do"
+ramp. Forcing the same filter there would mean refusing to run on a task
+the user is staring at on the board. Single-task URLs are an explicit user
+intent; honour it.
+
+### Notes
+
+- The filter assumes the project has a workflow attached. If the project
+  has none (Step 3.3 marks it `BOARD_MOVE_DISABLED`), the filter falls
+  back to "process everything" rather than dropping the whole tasklist,
+  with a one-line note in the plan.
+- Tasks that have no card (added before a workflow was attached) fall back
+  to `process` as well, so the filter never silently strands a backlog
+  task that was never put on the board.
+- `analyse_only` tasks still go through Step 3.5/3.7/3.10 fetches because
+  the analysis output should be informed by comments + attachments. Only
+  the mutation steps (6.1.5 in-progress move, 6.2 implementation, 6.7
+  commit, 6.8 timelog, 6.8.5 done move, 6.9 cleanup, 6.10 task complete)
+  are gated. This is the right trade-off — the extra fetches are cheap and
+  the user gets a better "Quick read" line for analyse-only tasks.
+
+### Compatibility
+
+- Fully backward compatible for **single-task URLs** — they always bypass
+  the filter, so `/teamwork-task https://…/tasks/12345` behaves exactly as
+  in v1.2.x.
+- For **tasklist URLs** the default behaviour changes: tasks that are not
+  in `To Do` + assigned to the current user end up `analyse_only`. Users
+  who want the v1.2.x "implement everything I'm given" behaviour can:
+  - Pass `--tasklist-filter=false` for a single run, or
+  - Set `"tasklist_filter": {"enabled": false}` in
+    `~/.claude/plugins/data/teamwork-task-wamesk/config.json` to disable it
+    persistently.
+- Existing config files automatically gain the `tasklist_filter` block via
+  the idempotent Step 2.6 migration; nothing the user previously set is
+  touched.
+
+---
+
 ## [1.2.0] - 2026-05-29
 
 **End-of-run worktree housekeeping + sub-rounding timelog fallback.**

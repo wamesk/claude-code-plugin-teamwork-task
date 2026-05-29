@@ -91,11 +91,32 @@
   },
 
   "min_log_minutes": 1,
+  "round_threshold_minutes": 4,
   "worktree_cleanup": {
     "enabled": true,
     "auto_remove_merged_clean": false,
     "stale_age_days": 14,
     "ignore_paths": [],
     "report_when_empty": false
+  },
+
+  "worktree_handoff": {
+    "enabled": true,
+    "default_action": "ask",
+    "default_target": "ask",
+    "merge_strategy": "ff_else_merge",
+    "delete_branch_after_merge": true,
+    "delete_worktree_after_merge": true,
+    "push_remote": "origin",
+    "skip_if_no_commits": true
+  },
+
+  "tasklist_filter": {
+    "enabled": true,
+    "todo_stage": "To Do",
+    "todo_stage_match_mode": "case_sensitive",
+    "only_assigned_to_me": true,
+    "analyze_all_tasks": true,
+    "skip_reason_render": "inline"
   }
 }

@@ -1,8 +1,8 @@
 ---
 name: teamwork-task
-version: 1.2.0
-description: "Use when the user provides a Teamwork.com URL (tasklist or task) and asks to 'work on these tasks', 'urob tasky z teamworku', 'spracuj tasky z teamwork', 'vypracuj tasky z teamworku', or invokes '/teamwork-task'. Fetches tasks via the Teamwork REST API (v3), pulls task description, attachments, comments (when needed), and file comments for context, **scans the local working tree for unattached specs / samples / DNR docs that match the task keywords and asks the user whether to use them**, **detects gating phrases in the task body (e.g. 'Bez vzorky nemá zmysel písať regex') and pauses with a question before implementing instead of barreling through with synthetic data**, implements tasks one by one in the current repository, moves the task on the board (In progress → Internal testing, with fallback to Testing), commits per task using the TYPE(scope)[<task-id>]: Message convention, and logs time back to Teamwork as sequential, non-overlapping 5-min-aligned entries that pick up from your last timelog of the day. Configurable safety gate asks for review when the diff touches UI/template files or grows beyond 100 lines. When the companion `teamwork-task-test` skill is installed, hands off to it at the very end so each task's acceptance criteria get individually verified before the user pushes. Pauses and asks the user via AskUserQuestion on blockers."
-argument-hint: "<teamwork-url> [--time-mode=real_rounded_5m|ask] [--branching=current_branch|new_feature_branch] [--plan-mode=overview|per_task|none] [--auto-commit=always|when_safe|never] [--test-after=true|false] [--worktree-cleanup=true|false|ask]"
+version: 1.3.0
+description: "Use when the user provides a Teamwork.com URL (tasklist or task) and asks to 'work on these tasks', 'urob tasky z teamworku', 'spracuj tasky z teamwork', 'vypracuj tasky z teamworku', or invokes '/teamwork-task'. Fetches tasks via the Teamwork REST API (v3), pulls task description, attachments, comments (when needed), and file comments for context, **scans the local working tree for unattached specs / samples / DNR docs that match the task keywords and asks the user whether to use them**, **detects gating phrases in the task body (e.g. 'Bez vzorky nemá zmysel písať regex') and pauses with a question before implementing instead of barreling through with synthetic data**, implements tasks one by one in the current repository, moves the task on the board (In progress → Internal testing, with fallback to Testing), commits per task using the TYPE(scope)[<task-id>]: Message convention, and logs time back to Teamwork as sequential, non-overlapping 5-min-aligned entries that pick up from your last timelog of the day. **For tasklist URLs the skill applies a board-column + assignee filter — only tasks in the column `To Do` (exact case-sensitive match) AND assigned to the current user are actually implemented; every other task in the tasklist is still fetched, analysed, and briefly commented on so the developer can sanity-check teammates' work without touching it. Single-task URLs deliberately bypass the filter.** Configurable safety gate asks for review when the diff touches UI/template files or grows beyond 100 lines. When the companion `teamwork-task-test` skill is installed, hands off to it at the very end so each task's acceptance criteria get individually verified before the user pushes. Pauses and asks the user via AskUserQuestion on blockers."
+argument-hint: "<teamwork-url> [--time-mode=real_rounded_5m|ask] [--branching=current_branch|new_feature_branch] [--plan-mode=overview|per_task|none] [--auto-commit=always|when_safe|never] [--local-discovery=true|false] [--readiness-gate=true|false] [--test-after=true|false] [--worktree-cleanup=true|false|ask] [--worktree-handoff=ask|merge|push|leave] [--worktree-target=ask|parent|main|<branch>] [--tasklist-filter=true|false] [--tasklist-todo-stage=<name>] [--tasklist-only-mine=true|false]"
 allowed-tools: [Bash, Read, Write, Edit, Grep, Glob, AskUserQuestion, Skill]
 ---
 
@@ -36,6 +36,11 @@ Optional flags (override config for this run only — not persisted):
 - `--readiness-gate=true|false` — pause with a question when a task body says it needs an external input that may not yet be available (default `true`, see Step 6.0)
 - `--test-after=true|false` — hand off to `/teamwork-task-test` after a clean finish (default `true`)
 - `--worktree-cleanup=true|false|ask` — at end of run, scan the repo for other worktrees and offer to remove ones that are merged & clean (default `true`, see Step 10)
+- `--worktree-handoff=ask|merge|push|leave` — when running inside a worktree, decide at the end of the run what to do with the worktree's commits (default `ask`, see Step 9.5). `merge` = fast-forward into parent, fall back to merge commit if FF impossible; `push` = push current branch to remote and leave for a PR; `leave` = no-op.
+- `--worktree-target=ask|parent|main|<branch>` — when `--worktree-handoff=merge`, decide where to merge into (default `ask`).
+- `--tasklist-filter=true|false` — applies only when `URL_KIND=tasklist`: filter tasks down to the ones in the configured board column AND assigned to the current user (default `true`, see Step 3.45). Has no effect on single-task URLs.
+- `--tasklist-todo-stage=<name>` — override `tasklist_filter.todo_stage` for this run (default `To Do`, **case-sensitive**).
+- `--tasklist-only-mine=true|false` — override `tasklist_filter.only_assigned_to_me` for this run (default `true`).
 
 If `$ARGUMENTS` is empty or does not contain a URL, ask the user via **AskUserQuestion** for the Teamwork URL before doing anything else.
 
@@ -139,6 +144,15 @@ jq '
   (.time_mode //= "real_rounded_5m") |
   (.time_rounding_minutes //= 5) |
   (.min_log_minutes //= 1) |
+  # One-shot rename for users who tested an early 1.3.0 build with the
+  # old `round_up_threshold_minutes` name. The key was never on a released
+  # tag, so this rename is best-effort cleanup — no fallback if both keys
+  # somehow co-exist (the new name wins).
+  (if has("round_up_threshold_minutes") and (has("round_threshold_minutes") | not)
+   then .round_threshold_minutes = .round_up_threshold_minutes
+        | del(.round_up_threshold_minutes)
+   else . end) |
+  (.round_threshold_minutes //= 4) |
   (.branching_mode //= "current_branch") |
   (.default_language //= "sk") |
   (.auto_complete_finished_tasks //= false) |
@@ -189,12 +203,30 @@ jq '
     "stale_age_days": 14,
     "ignore_paths": [],
     "report_when_empty": false
+  }) |
+  (.tasklist_filter //= {
+    "enabled": true,
+    "todo_stage": "To Do",
+    "todo_stage_match_mode": "case_sensitive",
+    "only_assigned_to_me": true,
+    "analyze_all_tasks": true,
+    "skip_reason_render": "inline"
+  }) |
+  (.worktree_handoff //= {
+    "enabled": true,
+    "default_action": "ask",
+    "default_target": "ask",
+    "merge_strategy": "ff_else_merge",
+    "delete_branch_after_merge": true,
+    "delete_worktree_after_merge": true,
+    "push_remote": "origin",
+    "skip_if_no_commits": true
   })
 ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
 chmod 600 "$CONFIG_FILE"
 ```
 
-The migration is idempotent — running it twice produces the same file. Do not print the config to stdout; only mention "config migrated to 1.1.3 schema" once if any change was made.
+The migration is idempotent — running it twice produces the same file. Do not print the config to stdout; only mention "config migrated to 1.3.0 schema" once if any change was made.
 
 The `auto_run_tests_after` key (added in 1.1.1) controls whether this skill, on a clean finish, hands off to `/teamwork-task-test` to verify the acceptance criteria of every implemented task. Default is `true`. Disable per run with `--test-after=false`.
 
@@ -205,6 +237,101 @@ The `readiness_gate` key (added in 1.1.3) controls Step 6.0 — detecting phrase
 The `worktree_cleanup` key (added in 1.2.0) controls Step 10 — at the end of a successful run, scan the repo for other git worktrees (typically `.claude/worktrees/<name>` left behind by prior background jobs) and offer to delete the ones that are clean and merged into the default branch. Default is `true`. Disable per run with `--worktree-cleanup=false`.
 
 The `min_log_minutes` key (added in 1.2.0) controls Step 6.6.1 — when the real-time headroom between the session cursor and `now()` is smaller than `time_rounding_minutes` (default 5) but at least `min_log_minutes` (default 1), the skill writes a smaller-than-round timelog entry instead of skipping the task entirely. The cursor still advances by the exact logged amount, so the next log resumes seamlessly. Set `min_log_minutes` to the same value as `time_rounding_minutes` to keep the legacy v1.1.x "5-min minimum or skip" behaviour.
+
+The `round_threshold_minutes` key (added in 1.3.0) decouples the rounding
+decision from how the skill treats short runs in Step 6.6. **Elapsed time
+strictly below this threshold is logged as raw minutes** (1, 2, or 3 min for
+the default `4`), while elapsed time *at or above* the threshold is rounded
+to the **nearest** `time_rounding_minutes` step using half-up integer
+rounding. With the defaults (`threshold=4`, `ROUND=5`):
+
+| elapsed | logged | reason                       |
+| ------- | ------ | ---------------------------- |
+| 1–3 min | 1–3    | below threshold — raw        |
+| 4 min   | 5      | nearest multiple of 5        |
+| 5 min   | 5      | exact                        |
+| 6 min   | 5      | 6 is closer to 5 than to 10  |
+| 7 min   | 5      | 7 is closer to 5 than to 10  |
+| 8 min   | 10     | 8 is closer to 10            |
+| 11 min  | 10     | 11 is closer to 10 than to 15 |
+| 12 min  | 10     | 12 is closer to 10           |
+| 13 min  | 15     | 13 is closer to 15           |
+
+The motivation is honest billing in both directions: a 30-second
+documentation tweak should not be billed as 5 minutes (handled by the
+sub-round zone), and an 11-minute hotfix should not be padded to 15 just
+because the previous policy was "always round up" (handled by the
+round-to-nearest zone). Set `round_threshold_minutes` equal to
+`time_rounding_minutes` to recover the pre-1.3.0 "everything rounds up to
+ROUND" behaviour (every entry will be ≥ 5 min and bias upward). Set it to
+`1` to apply nearest-rounding to every entry and disable the sub-round
+raw-minutes zone entirely. Note: the **old key name**
+`round_up_threshold_minutes` from early 1.3.0 builds is silently renamed
+to `round_threshold_minutes` by the Step 2.6 migration; the value is
+preserved.
+
+The `tasklist_filter` key (added in 1.3.0) controls Step 3.45 — when the user
+hands a **tasklist** URL, the skill only implements tasks that are (a) currently
+in the column named by `todo_stage` (default `To Do`, matched
+**case-sensitively** by default — i.e. `to do`, `TO DO`, `ToDo` do **not**
+match) and (b) assigned to the current authenticated user. The remaining tasks
+in the tasklist are still fetched and briefly analysed in the plan (Step 4) but
+the worker loop (Step 6) skips their implementation, commit, time log, and
+board moves — so a Laravel-backend developer running the skill against a
+shared "Backend + Ionic frontend" tasklist sees teammates' tasks for context
+and can comment on them, but does not start coding them. Single-task URLs
+(`URL_KIND=task`) **always** bypass the filter, no matter the config — when a
+user opens a specific task by ID they typically want it processed regardless
+of where it sits on the board. Disable entirely with
+`"tasklist_filter": {"enabled": false}` or per run with
+`--tasklist-filter=false`.
+
+The `worktree_handoff` key (added in 1.3.0) controls Step 9.5 — when the
+skill is executing **inside a git worktree** (typical for background runs
+launched via `EnterWorktree`, or whenever the user starts the session from
+`.claude/worktrees/<name>`), commits land on the worktree's branch and never
+reach `main` on their own. v1.3.0 closes that loop: after the final summary
+(Step 7) and the optional verification handoff (Step 8) but **before** the
+push reminder (Step 9), the skill detects that it is running in a worktree
+with at least one new commit and offers, via **AskUserQuestion**, one of:
+- *Merge into a target branch* (default — fast-forward if possible, fall
+  back to merge commit). The target is asked separately (parent / main /
+  custom), so the user can confirm where the commits go.
+- *Push the worktree branch and let me open a PR.*
+- *Leave as-is — I will handle the handoff manually.*
+On a successful merge, both the branch and the worktree are removed by
+default (`delete_branch_after_merge` + `delete_worktree_after_merge`), which
+chains into Step 10 cleanup without re-asking. Disable per run with
+`--worktree-handoff=leave` or persistently with
+`"worktree_handoff": {"enabled": false}`. Power users can preset
+`default_action=merge` (skip the first question) and/or
+`default_target=parent` (skip the target question) for unattended runs.
+
+---
+
+## Step 2.7 — Resolve current user (cached for the whole run)
+
+Step 3.45 (tasklist filter) and Step 5.5 (time cursor) both need the
+authenticated user's numeric ID. Teamwork's v3 API does not expose a `/me`
+endpoint, so fetch it once from the legacy v1 `/me.json` and cache it:
+
+```bash
+USER_ID=$(curl -sS -u "$AUTH" -H "Accept: application/json" \
+  "${BASE}/me.json" | jq -r '.person.id // empty')
+
+if [ -z "$USER_ID" ]; then
+  echo "  ⚠ could not resolve the current Teamwork user — assignee filter (Step 3.45) and last-timelog cursor (Step 5.5) will fall back to safe defaults." >&2
+fi
+```
+
+Treat the empty case as **non-fatal**:
+- Step 3.45 falls back to "stage filter only" (skip the assignee check) so the
+  user is never silently locked out of their own tasklist by a missing
+  permission.
+- Step 5.5 falls back to `floor(now)` as it already does today.
+
+Do not echo the token in the error message even when the call fails — leave
+the token entirely out of stdout/stderr.
 
 ---
 
@@ -308,6 +435,47 @@ else
     fi
   done
 fi
+
+# --- v1.3.0: tasklist filter "To Do" stage lookup ---------------------------
+# Build a *case-sensitive* lookup table alongside the case-insensitive one above.
+# Step 3.45 needs to resolve the column "To Do" (or whatever the user configured)
+# using strict casing — `to do`, `TO DO`, `ToDo` must NOT match the user's
+# explicit "To Do" preference. We keep a second TSV with the raw name so the
+# case-sensitive lookup is a single awk pass without re-fetching workflows.
+STAGE_TABLE_CS_FILE="/tmp/tw_stages_cs_${PROJECT_ID}.tsv"
+echo "$WF_RESP" | jq -r '
+  if (.included.stages | type) == "object" then
+    .included.stages | to_entries[] | [(.value.name // ""), (.key // (.value.id|tostring))]
+  elif (.included.stages | type) == "array" then
+    .included.stages[]                  | [(.name // ""), (.id|tostring)]
+  else empty end
+  | "\(.[0])\t\(.[1])"
+' > "$STAGE_TABLE_CS_FILE"
+
+# Case-sensitive lookup helper (used by Step 3.45 only).
+lookup_stage_id_cs() {
+  awk -F '\t' -v n="$1" '$1 == n { print $2; exit }' "$STAGE_TABLE_CS_FILE"
+}
+
+# Resolve the "To Do" stage ID per project. Honour the configured match mode —
+# `case_sensitive` (default) uses the strict CS lookup; `case_insensitive`
+# delegates to the existing lookup_stage_id helper.
+TODO_NAME=$(jq -r '.tasklist_filter.todo_stage // "To Do"' "$CONFIG_FILE")
+TODO_MATCH_MODE=$(jq -r '.tasklist_filter.todo_stage_match_mode // "case_sensitive"' "$CONFIG_FILE")
+
+if [ "$TODO_MATCH_MODE" = "case_insensitive" ]; then
+  TODO_STAGE_ID=$(lookup_stage_id "$TODO_NAME")
+else
+  TODO_STAGE_ID=$(lookup_stage_id_cs "$TODO_NAME")
+fi
+
+if [ -z "$TODO_STAGE_ID" ]; then
+  # Not having a "To Do" column is normal on freeform Kanban boards. The
+  # tasklist filter (Step 3.45) reports this in the plan rather than blocking
+  # the run — the user can still pass `--tasklist-filter=false` to process
+  # everything anyway.
+  TODO_STAGE_MISSING_FOR_PROJECT[$PROJECT_ID]=1
+fi
 ```
 
 Outcomes (per project):
@@ -332,6 +500,240 @@ TASKLIST_DESCRIPTION=$(echo "$TL_DESC_RAW" | sed -E 's|<[^>]+>||g' | sed -E 's/[
 ```
 
 If `TASKLIST_DESCRIPTION` is non-empty, render it in Step 4 under a `## Tasklist context` heading.
+
+### Step 3.45 — Tasklist filter: only "To Do" + assigned to me
+
+**This step runs only when `URL_KIND=tasklist`. Single-task URLs skip it
+entirely** — when a user opens a specific task by ID we trust that intent
+and process the task regardless of column or assignee.
+
+The motivation is the multi-repo Kanban reality: a single Teamwork project
+often contains both a Laravel backend and an Ionic / iOS / Vue frontend, each
+owned by a different developer working in a different repository. Without a
+filter, running `/teamwork-task <tasklist-url>` from the Laravel repo would
+happily pick up the iOS engineer's frontend tasks and start "implementing"
+them in the wrong codebase. The filter narrows the *implementation* set to
+the tasks the current developer actually owns and has greenlit, while still
+fetching the rest for context so the developer can sanity-check teammates'
+work in the same plan.
+
+Skip this step entirely when **any** of these hold:
+- `URL_KIND != "tasklist"` (single-task URL) — bypass by design.
+- `config.tasklist_filter.enabled == false` or `--tasklist-filter=false`.
+
+```bash
+TF_ENABLED=$(jq -r       '.tasklist_filter.enabled // true'                       "$CONFIG_FILE")
+TF_ONLY_MINE=$(jq -r     '.tasklist_filter.only_assigned_to_me // true'           "$CONFIG_FILE")
+TF_ANALYZE_ALL=$(jq -r   '.tasklist_filter.analyze_all_tasks // true'             "$CONFIG_FILE")
+TF_TODO_NAME=$(jq -r     '.tasklist_filter.todo_stage // "To Do"'                 "$CONFIG_FILE")
+TF_TODO_MATCH=$(jq -r    '.tasklist_filter.todo_stage_match_mode // "case_sensitive"' "$CONFIG_FILE")
+
+if [ "$URL_KIND" != "tasklist" ] || [ "$TF_ENABLED" != "true" ]; then
+  # Bypass — every task keeps its default `process_mode=process` from the
+  # fetcher in Step 3 and the worker loop runs unchanged.
+  echo "  ℹ tasklist filter disabled or single-task URL — processing all fetched tasks." >&2
+else
+  # Fetch a card view of the tasklist so we know each task's current stage.
+  # `?include=cards,stages` returns `.included.cards` (cardId → {stageId,…})
+  # and `.included.stages` (stageId → {name,…}). For tasks without a card
+  # (e.g. tasks added before the workflow was attached), the lack of a stage
+  # is treated as "not in To Do".
+  CARDS_RESP=$(curl -sS -u "$AUTH" -H "Accept: application/json" \
+    "${BASE}/projects/api/v3/tasklists/${ENTITY_ID}/tasks.json?pageSize=250&page=1&include=cards,stages")
+
+  # Build a temp lookup: taskId<TAB>stageName (lowercased) so we can compare
+  # against TF_TODO_NAME using the configured match mode below. The lookup
+  # tolerates both object-shaped (.included.cards as map) and array-shaped
+  # responses to match Step 3.3.
+  TASK_STAGE_FILE="/tmp/tw_task_stages_${ENTITY_ID}.tsv"
+  echo "$CARDS_RESP" | jq -r '
+    # 1) Build (cardId -> stageName) map.
+    (
+      if (.included.cards | type) == "object" then
+        .included.cards | to_entries | map({key:.key, value:.value.stageId|tostring})
+      elif (.included.cards | type) == "array" then
+        .included.cards | map({key:(.id|tostring), value:(.stageId|tostring)})
+      else [] end
+    ) as $cards
+    |
+    (
+      if (.included.stages | type) == "object" then
+        .included.stages | to_entries | map({key:.key, value:(.value.name // "")})
+      elif (.included.stages | type) == "array" then
+        .included.stages | map({key:(.id|tostring), value:(.name // "")})
+      else [] end
+    ) as $stages
+    |
+    # 2) Resolve every task to "<taskId>\t<stageName>" (stageName may be empty).
+    (.tasks // .data // [])
+    | map({
+        id: (.id|tostring),
+        cardId: ((.cardId // .card_id // "") | tostring),
+        assignees: ([(.assignees[]?.id // .assignedUserIds[]? // empty)] | map(tostring))
+      })
+    | map(
+        . as $t
+        | ($cards | map(select(.key == $t.cardId)) | first) as $card
+        | ($card.value // "") as $stageId
+        | ($stages | map(select(.key == $stageId)) | first) as $stage
+        | $t + {stageName: ($stage.value // "")}
+      )
+    | .[]
+    | "\(.id)\t\(.stageName)\t\(.assignees | join(","))"
+  ' > "$TASK_STAGE_FILE"
+
+  # For each task, set process_mode:
+  #   "process"           → fully run (implement, commit, log, board move)
+  #   "analyse_only"      → fetch + plan-time analysis, but worker loop skips
+  #
+  # Reason codes (rendered in the plan as "Skip reason: …"):
+  #   "wrong_stage"       → stage != configured To Do
+  #   "wrong_assignee"    → assignees do not include current user
+  #   "wrong_stage+wrong_assignee" → both conditions failed
+  #   "no_card"           → task has no card (no workflow attached)
+
+  PROCESS_FILE="/tmp/tw_tasks_process_${ENTITY_ID}.tsv"
+  : > "$PROCESS_FILE"
+
+  while IFS=$'\t' read -r T_ID T_STAGE T_ASSIGNEES; do
+    [ -z "$T_ID" ] && continue
+
+    REASONS=""
+
+    # --- Stage check -------------------------------------------------------
+    STAGE_OK=0
+    if [ -z "$T_STAGE" ]; then
+      REASONS="no_card"
+    else
+      case "$TF_TODO_MATCH" in
+        case_insensitive)
+          if [ "$(echo "$T_STAGE" | tr '[:upper:]' '[:lower:]')" = \
+               "$(echo "$TF_TODO_NAME" | tr '[:upper:]' '[:lower:]')" ]; then
+            STAGE_OK=1
+          fi
+          ;;
+        *)
+          # case_sensitive (default) — strict string equality
+          [ "$T_STAGE" = "$TF_TODO_NAME" ] && STAGE_OK=1
+          ;;
+      esac
+      [ "$STAGE_OK" -eq 0 ] && REASONS="wrong_stage(${T_STAGE})"
+    fi
+
+    # --- Assignee check ---------------------------------------------------
+    ASSIGNEE_OK=1
+    if [ "$TF_ONLY_MINE" = "true" ]; then
+      if [ -z "$USER_ID" ]; then
+        # Step 2.7 already warned; treat as "skip assignee check" so we don't
+        # accidentally lock the user out of their own work.
+        ASSIGNEE_OK=1
+      else
+        # Comma-separated list of numeric IDs; membership check.
+        if echo ",${T_ASSIGNEES}," | grep -q ",${USER_ID},"; then
+          ASSIGNEE_OK=1
+        else
+          ASSIGNEE_OK=0
+          if [ -n "$REASONS" ]; then
+            REASONS="${REASONS}+wrong_assignee"
+          else
+            REASONS="wrong_assignee"
+          fi
+        fi
+      fi
+    fi
+
+    # --- Decide mode ------------------------------------------------------
+    if [ "$STAGE_OK" -eq 1 ] && [ "$ASSIGNEE_OK" -eq 1 ]; then
+      printf "%s\tprocess\t\n" "$T_ID" >> "$PROCESS_FILE"
+    else
+      if [ "$TF_ANALYZE_ALL" = "true" ]; then
+        printf "%s\tanalyse_only\t%s\n" "$T_ID" "$REASONS" >> "$PROCESS_FILE"
+      else
+        # Strict mode — drop the task from the plan entirely.
+        printf "%s\tdrop\t%s\n" "$T_ID" "$REASONS" >> "$PROCESS_FILE"
+      fi
+    fi
+  done < "$TASK_STAGE_FILE"
+
+  # Counters for the plan banner and the final summary.
+  TF_COUNT_PROCESS=$(awk -F '\t' '$2 == "process"      { c++ } END { print c+0 }' "$PROCESS_FILE")
+  TF_COUNT_ANALYSE=$(awk -F '\t' '$2 == "analyse_only" { c++ } END { print c+0 }' "$PROCESS_FILE")
+  TF_COUNT_DROP=$(   awk -F '\t' '$2 == "drop"         { c++ } END { print c+0 }' "$PROCESS_FILE")
+  TF_COUNT_TOTAL=$(  awk -F '\t' 'END { print NR+0 }'                       "$PROCESS_FILE")
+
+  echo "  ℹ tasklist filter: ${TF_COUNT_PROCESS} to implement, ${TF_COUNT_ANALYSE} analyse-only, ${TF_COUNT_DROP} dropped" >&2
+
+  # --- Empty-result handling --------------------------------------------
+  # If the filter dropped EVERY task into analyse_only/drop, surface a
+  # detailed explanation of WHICH rule disqualified each task so the user
+  # can decide whether to widen the filter or pick something to promote.
+  # The message itself is rendered here in stderr; Step 4 short-circuits
+  # to a dedicated AskUserQuestion when TF_COUNT_PROCESS == 0.
+  if [ "$TF_COUNT_PROCESS" = "0" ]; then
+    USER_HINT="$USER_ID"
+    [ -z "$USER_HINT" ] && USER_HINT="(unresolved — assignee check was skipped)"
+
+    {
+      echo ""
+      echo "  ⚠ Tasklist filter found 0 tasks to implement out of ${TF_COUNT_TOTAL} fetched."
+      echo "    Rules that were applied:"
+      echo "      • URL kind        = tasklist                      (single-task URLs bypass the filter)"
+      echo "      • Stage required  = \"${TF_TODO_NAME}\"             (match mode: ${TF_TODO_MATCH})"
+      echo "      • Assignee check  = $( [ "$TF_ONLY_MINE" = "true" ] && echo "on (must include user ${USER_HINT})" || echo "off" )"
+      echo "      • analyze_all     = ${TF_ANALYZE_ALL}             (false would have dropped the rest entirely)"
+      echo ""
+      echo "    Per-task reasons (top 10):"
+      awk -F '\t' '$2 != "process" { printf "      • [#%s] %s\n", $1, $3 }' "$PROCESS_FILE" | head -n 10
+      if [ "$TF_COUNT_TOTAL" -gt 10 ]; then
+        echo "      • … and $(( TF_COUNT_TOTAL - 10 )) more (see plan section)"
+      fi
+      echo ""
+      echo "    Most common causes:"
+      echo "      - the tasklist's tasks are sitting in a different column"
+      echo "        (e.g. \"Backlog\", \"In progress\"); pass --tasklist-todo-stage=\"Backlog\""
+      echo "      - the tasks are assigned to teammates; pass --tasklist-only-mine=false"
+      echo "      - the project workflow uses a different casing"
+      echo "        (e.g. \"to do\" vs \"To Do\"); set tasklist_filter.todo_stage_match_mode=case_insensitive"
+      echo "      - you simply have nothing assigned in \"${TF_TODO_NAME}\" right now"
+      echo ""
+      echo "    Step 4 will ask how to proceed — disable the filter, promote a"
+      echo "    specific task from the analyse-only list, change the stage name,"
+      echo "    or cancel the run."
+      echo ""
+    } >&2
+  fi
+fi
+```
+
+**Edge cases the filter has to handle gracefully:**
+
+1. **`USER_ID` unresolved** (Step 2.7 returned empty) → skip the assignee
+   check entirely so the user is never silently locked out of their own
+   tasklist by a permission glitch. Log one warning line. The stage check
+   still applies.
+2. **Project has no workflow** (Step 3.3 marked `BOARD_MOVE_DISABLED`) →
+   `TODO_STAGE_ID` is unresolved and every task ends up with empty
+   `T_STAGE`; without a stage we cannot honour the filter. Treat the entire
+   tasklist as `process` (do not block the run on a workflow that is not
+   set up yet) and surface a one-line note in the plan.
+3. **Task has no card / not on the board** → behaves the same as no
+   workflow: cannot evaluate `To Do`, falls back to `process`. The plan
+   marks it explicitly so the user sees why.
+4. **`analyze_all_tasks=false`** (strict mode) → tasks that fail the filter
+   are *dropped* from `TASKS_TO_PROCESS` entirely — not even rendered in the
+   plan. Use when the user does not want teammates' tasks polluting the
+   overview.
+5. **The user passes a `tasks` URL but the task happens to be in a `To Do`
+   column owned by someone else** → still processed (single-task URL bypass
+   from the very top of this step). The skill prints one informational line
+   *"single-task URL — tasklist filter bypassed"* so the user is aware.
+
+Later steps (Step 3.5 fetch comments, Step 3.7 attachments, Step 3.10 local
+discovery) still run for **every** task that survived the filter — including
+`analyse_only` ones — because the analysis output in the plan should be
+informed by the same context. Only the **implementation side-effects**
+(commits, time logs, board moves, attachment cleanup that is per-task) are
+gated by `process_mode` in Step 6.
 
 ### Step 3.5 — Fetch comments per task (conditional)
 
@@ -610,15 +1012,26 @@ Read `plan_mode` from config (or its CLI override). Default is `overview`.
 - **`plan_mode = overview`** (default) — build a single tasklist-wide plan, ask the user to approve it once before any work starts.
 - **`plan_mode = per_task`** — skip this step; in the worker loop (Step 6.2) ask for approval **before** each task individually.
 
-For `overview`, render a concise markdown plan to stdout:
+For `overview`, render a concise markdown plan to stdout. For tasklist URLs
+the plan is **two-section**: first the tasks the skill will actually
+implement (`process_mode == "process"`), then the analyse-only ones (and
+dropped ones if the user wants to see them via `--show-dropped`):
 
 ```
 ## Tasklist context (if URL_KIND=tasklist and TASKLIST_DESCRIPTION non-empty)
 <TASKLIST_DESCRIPTION>
 
-## Plan for tasklist "<name>" (<N> tasks)
+## Plan for tasklist "<name>" (<TF_COUNT_PROCESS> to implement, <TF_COUNT_ANALYSE> analyse-only, <TF_COUNT_DROP> dropped)
 
-### 1. [#<task-id>] <title>  (est: <X> min, priority: <p>)
+> Tasklist filter (v1.3.0): implementing only tasks in the column
+> "<TF_TODO_NAME>" (<TODO_MATCH_MODE>) AND assigned to <USER_DISPLAY_NAME>.
+> Pass `--tasklist-filter=false` to process everything.
+
+---
+
+### To implement (<TF_COUNT_PROCESS>)
+
+#### 1. [#<task-id>] <title>  (est: <X> min, priority: <p>, stage: To Do, assignee: me)
 **Goal (final summary):** <one-line summary from description below HR>
 **Acceptance:** <bullet list condensed from description above HR>
 **Approach:** <1-3 sentences — what files / modules will likely change, what tests, what risks>
@@ -629,8 +1042,33 @@ For `overview`, render a concise markdown plan to stdout:
 **Missing inputs:** <none | "Real Tatra banka notification sample" (BLOCKER — gating phrase in description) | "Final colour value" (SOFT — referenced in comment)>  ← from Step 3.10 (gap) + Step 6.0 patterns
 **Board target:** <In progress → Internal testing | In progress → Testing (fallback) | start only — no testing column | disabled — no workflow on this project>
 
-### 2. [#<task-id>] ...
+#### 2. [#<task-id>] ...
+
+---
+
+### Analyse only — not implemented in this run (<TF_COUNT_ANALYSE>)
+
+> These tasks are in the tasklist but did not pass the v1.3.0 filter.
+> Listed here so you can sanity-check teammates' work, but the skill will
+> NOT touch them: no commits, no time logs, no board moves. To process any
+> of them anyway, pass `--tasklist-filter=false` or re-run with the single
+> task URL.
+
+#### 3. [#<task-id>] <title>  (stage: <stage>, assignee: <name>) ⏭ analyse-only
+**Why skipped:** wrong_stage(In progress) + wrong_assignee
+**Goal (final summary):** <one-line summary>
+**Quick read:** <1-2 sentence opinion / sanity check — "looks correctly scoped" / "watch out for X" / "approach mismatch with our backend convention" / "missing AC for offline behaviour">
+**Comments context:** <one-line digest if any non-trivial decisions in comments>
+
+#### 4. …
 ```
+
+The **`Quick read`** line is the only piece of generative output produced for
+analyse-only tasks — keep it to 1–2 sentences, focused on *what would a
+reviewer flag if they had two minutes*. Do not draft full implementations, do
+not propose tests, do not run the test-strategy detector from Step 6.2.5 — the
+worker loop is going to skip them anyway. The skill is acting as a second
+pair of eyes on the team's plan, not a ghost-coder for teammates.
 
 The **`Missing inputs`** line is the single most important addition in v1.1.3 —
 it makes the plan honest about what the skill cannot guess. Sources:
@@ -647,11 +1085,60 @@ question gets one extra option:
 
 Then ask the user via **AskUserQuestion**:
 
-- **Approve and start** — proceed to Step 5.
-- **Skip some tasks** — user lists which task IDs to drop, then re-render the plan and re-ask.
+- **Approve and start** — proceed to Step 5 (process only the "To implement" section; analyse-only output stays on screen for reference).
+- **Skip some tasks** — user lists which task IDs to drop from "To implement", then re-render the plan and re-ask.
 - **Reorder** — user provides new order, re-render and re-ask.
 - **Add context to a task** — user picks a task and pastes extra context; append it to that task's working notes, re-render the plan, re-ask.
+- **Promote an analyse-only task to implement** — user picks one or more task IDs from the "Analyse only" section; the skill flips `process_mode` to `process` for those IDs only and re-renders the plan with them moved to the top section. Useful when the user happens to own a teammate's task ad-hoc.
+- **Disable the tasklist filter for this run** — equivalent to `--tasklist-filter=false`: every fetched task becomes `process` regardless of stage/assignee. Re-renders the plan with everything in "To implement".
 - **Cancel** — abort the run, no commits, no time logs, no board moves.
+
+### Step 4.0a — Empty-result short-circuit (v1.3.0)
+
+When `URL_KIND == "tasklist"` AND the tasklist filter produced
+`TF_COUNT_PROCESS == 0` (no tasks survived the "To Do" + me filter), the
+normal plan-approval question above is **replaced** by a focused
+"nothing-to-implement" prompt. Step 3.45 has already printed the rule list
++ per-task reasons to stderr, so the user knows *why* the result is empty;
+this step's job is to make the next move one click away.
+
+Render the plan with **only** the *Analyse only — not implemented in this
+run* section (the *To implement* heading is omitted), preceded by:
+
+```
+## Plan for tasklist "<name>"
+
+⚠ The v1.3.0 tasklist filter found 0 tasks to implement.
+
+  Rules: column = "<TF_TODO_NAME>" (<TF_TODO_MATCH>), assignee = <USER_HINT>
+         analyze_all = <TF_ANALYZE_ALL>
+
+  See the stderr output above for the per-task reason list, then pick one
+  of the options below.
+```
+
+Then ask via **AskUserQuestion** with this option set instead of the
+normal six:
+
+- **Disable the filter for this run** *(recommended)* — equivalent to
+  `--tasklist-filter=false`. Flip every analyse-only task to `process`
+  and re-render the plan with the full task list, then re-ask the normal
+  approval question.
+- **Pick tasks from the analyse-only list to implement** — multi-select
+  the IDs to promote to `process`. Re-renders the plan + normal approval
+  question.
+- **Change the required stage name** — free-text prompt for a new
+  `tasklist_filter.todo_stage` value (e.g. "Backlog", "Ready"). Re-runs
+  Step 3.45 with the new name, then re-renders. Does **not** persist the
+  change unless the user also opts to save it.
+- **Toggle the assignee check off** — equivalent to
+  `--tasklist-only-mine=false`. Re-runs Step 3.45, then re-renders.
+- **Cancel** — abort the run.
+
+If the run had no analyse-only tasks either (somebody pointed at an
+empty tasklist), the prompt collapses to just *Disable the filter* /
+*Change the stage name* / *Cancel* — the *Pick tasks* and *Toggle
+assignee check* options are hidden because they cannot help.
 
 The plan generation time is **not** logged to Teamwork — the per-task timer starts only inside the worker loop (Step 6.1).
 
@@ -711,6 +1198,82 @@ Read `branching_mode` from config (or `--branching` override).
   BRANCH="feature/teamwork-tasklist-${ENTITY_ID}"
   git rev-parse --verify "$BRANCH" >/dev/null 2>&1 && git checkout "$BRANCH" || git checkout -b "$BRANCH"
   ```
+
+### Step 5.1 — Detect worktree mode + cache parent branch
+
+When the skill runs from inside a git worktree (typical for `EnterWorktree`
+isolation or `.claude/worktrees/<name>` background jobs), every commit in
+the worker loop lands on the worktree's branch — not on `main`. Without an
+explicit handoff at the end of the run, those commits stay in the worktree
+forever; the user has to remember to merge them by hand. Step 9.5 closes
+that loop, but it needs three pieces of context resolved up front:
+
+```bash
+# Resolve the main repo's working directory (handles being inside a worktree).
+MAIN_REPO=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null \
+  | sed -E 's|/\.git$||; s|/\.git/worktrees/[^/]+$||')
+
+# Where we are now.
+CURRENT_WT=$(git rev-parse --show-toplevel 2>/dev/null)
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null)
+
+# Are we in the main repo, or in a worktree off it?
+if [ -n "$MAIN_REPO" ] && [ "$MAIN_REPO" != "$CURRENT_WT" ]; then
+  WT_RUN_IN_WORKTREE=1
+else
+  WT_RUN_IN_WORKTREE=0
+fi
+
+# Capture HEAD before the worker loop so Step 9.5 can compute "commits made
+# this run". A user who started with a dirty worktree (uncommitted edits
+# committed during plan approval) gets only this-run commits surfaced — not
+# the pre-existing ones.
+WT_HEAD_BEFORE=$(git rev-parse HEAD 2>/dev/null || echo "")
+
+# Resolve the parent branch — i.e. where this worktree branched off. Best
+# effort: prefer the branch the worktree was created from (recorded in
+# `git config` for the worktree under `branch.<name>.<parent>` when set by
+# Claude Code / EnterWorktree), fall back to origin/HEAD, then main /
+# master / trunk.
+WT_PARENT_BRANCH=""
+
+if [ "$WT_RUN_IN_WORKTREE" = "1" ]; then
+  # 1. Try a sticky config note (Claude Code / EnterWorktree sometimes set this).
+  WT_PARENT_BRANCH=$(git -C "$CURRENT_WT" config --get "branch.${CURRENT_BRANCH}.claudeParent" 2>/dev/null)
+
+  # 2. Fall back to origin/HEAD on the main repo.
+  if [ -z "$WT_PARENT_BRANCH" ]; then
+    WT_PARENT_BRANCH=$(git -C "$MAIN_REPO" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null \
+                      | sed 's|^origin/||')
+  fi
+
+  # 3. Conventional names.
+  if [ -z "$WT_PARENT_BRANCH" ]; then
+    for B in main master trunk; do
+      if git -C "$MAIN_REPO" show-ref --verify --quiet "refs/heads/$B"; then
+        WT_PARENT_BRANCH="$B"
+        break
+      fi
+    done
+  fi
+
+  # 4. Last resort: current HEAD on the main repo.
+  [ -z "$WT_PARENT_BRANCH" ] && \
+    WT_PARENT_BRANCH=$(git -C "$MAIN_REPO" rev-parse --abbrev-ref HEAD 2>/dev/null)
+
+  echo "  ℹ running inside a worktree (${CURRENT_WT}); branch=${CURRENT_BRANCH}, parent=${WT_PARENT_BRANCH:-unknown}" >&2
+fi
+```
+
+Why up here in Step 5 rather than next to Step 10:
+- The detection is **cheap** (no Teamwork API calls) but needs the working
+  directory + `git` to be reachable, which is exactly the state right
+  before the worker loop starts.
+- `WT_HEAD_BEFORE` has to be captured **before** any commit, otherwise the
+  end-of-run handoff cannot reliably distinguish "commits made by this
+  run" from "commits already there when I started".
+- If `WT_RUN_IN_WORKTREE=0`, the rest of this section is skipped and Step
+  9.5 turns into a no-op.
 
 ### Step 5.5 — Initialize the session time cursor
 
@@ -776,9 +1339,13 @@ TIME_CURSOR_SOURCE=""
 
 case "$STRATEGY" in
   last_teamwork_timelog)
-    # 1. Resolve current user via V1 /me.json (V3 has no me endpoint)
-    USER_ID=$(curl -sS -u "$AUTH" -H "Accept: application/json" \
-      "${BASE}/me.json" | jq -r '.person.id // empty')
+    # USER_ID was resolved once in Step 2.7 and cached for the whole run; reuse it.
+    # (Pre-1.3.0 this step fetched /me.json itself — kept the call only as a fallback
+    # below in case the earlier resolution failed.)
+    if [ -z "$USER_ID" ]; then
+      USER_ID=$(curl -sS -u "$AUTH" -H "Accept: application/json" \
+        "${BASE}/me.json" | jq -r '.person.id // empty')
+    fi
 
     if [ -n "$USER_ID" ]; then
       # 2. Get most recent timelog of TODAY for that user
@@ -829,6 +1396,45 @@ Three hard guarantees from this algorithm:
 ## Step 6 — Worker loop (per task)
 
 For each task in the (approved and possibly reordered) list, in order:
+
+### Step 6.0a — Process-mode gate (v1.3.0)
+
+**Run this BEFORE Step 6.0 / 6.1 / anything else** — the `0a` suffix marks
+that this gate sits in front of the readiness gate (Step 6.0) in execution
+order while staying inside the per-task worker loop (so it cannot be hoisted
+out to Step 5.x where there is no current task). If the task's
+`process_mode` (set in Step 3.45) is `analyse_only`, the worker loop skips
+**every** mutation for this task — no timer, no board move, no implementation,
+no commit, no time log, no attachment cleanup, no board move to *Internal
+testing*. The task's `Quick read` line from Step 4 is the entire on-screen
+output; the loop continues with the next task.
+
+```bash
+PROCESS_MODE=$(awk -F '\t' -v id="$TASK_ID" '$1 == id { print $2; exit }' \
+  "/tmp/tw_tasks_process_${ENTITY_ID}.tsv" 2>/dev/null)
+
+# Single-task URLs never write to that file → default to "process" so the
+# behaviour matches v1.2.x for /teamwork-task <task-url> runs.
+[ -z "$PROCESS_MODE" ] && PROCESS_MODE="process"
+
+if [ "$PROCESS_MODE" = "analyse_only" ]; then
+  echo "  ⏭ [#${TASK_ID}] analyse-only (failed tasklist filter) — skipping worker loop." >&2
+
+  # Accounting for the Step 7 summary.
+  ANALYSE_ONLY_TASKS+=("${TASK_ID}")
+
+  # No timer, no commit, no log, no board move. Move to the next task.
+  continue
+fi
+```
+
+Initialize `ANALYSE_ONLY_TASKS=()` alongside `SKIPPED_TIMELOGS=()` etc. at
+the start of the worker loop so Step 7 always has a value to render.
+
+The `process_mode` gate sits *above* the readiness gate (Step 6.0) on
+purpose: an analyse-only task whose description matches a gating phrase
+should still be quietly skipped, not turned into an `AskUserQuestion`
+prompt the user has to dismiss for someone else's work.
 
 ### Step 6.0 — Readiness gate (per task)
 
@@ -1104,61 +1710,153 @@ If the project has a test suite and the change is testable:
 If PHP files changed: `vendor/bin/pint --dirty --format agent`.
 
 ### 6.6 Stop timer + decide minutes
+
+v1.3.0 splits the rounding decision into **two zones** controlled by the new
+`round_threshold_minutes` key (default `4`):
+
+- `ELAPSED_MIN >= round_threshold_minutes` → round to the **nearest**
+  `time_rounding_minutes` step using **half-up integer rounding**
+  (`((n + ROUND/2) / ROUND) * ROUND`). With the defaults (`threshold=4`,
+  `ROUND=5`):
+  | elapsed | logged |
+  | ------- | ------ |
+  | 4 min   | 5 min  |
+  | 5 min   | 5 min  |
+  | 6 min   | 5 min  |
+  | 7 min   | 5 min  |
+  | 8 min   | 10 min |
+  | 9 min   | 10 min |
+  | 10 min  | 10 min |
+  | 11 min  | 10 min |
+  | 12 min  | 10 min |
+  | 13 min  | 15 min |
+  | 14 min  | 15 min |
+  | 15 min  | 15 min |
+
+  The exact tipping point is `n + ROUND/2 >= next ROUND multiple`, i.e.
+  the value `2.5`, `7.5`, `12.5`, … rounds *up*. The previous round-up
+  policy (every value over the previous step rounded up) systematically
+  over-billed by 0–4 min per task; round-to-nearest distributes those
+  fractional minutes honestly in both directions.
+- `ELAPSED_MIN >= min_log_minutes` but **strictly below** the threshold → log
+  the **raw** elapsed minutes (1, 2, or 3 with the default threshold of 4).
+  The cursor advances by exactly that many minutes — `TIMELOG_SUB_ROUND=1`
+  is set so Step 7 surfaces the entry as a deliberate sub-round, and the
+  next log starts off the 5-minute grid.
+- `ELAPSED_MIN < min_log_minutes` → either log `min_log_minutes` as a floor
+  (when `time_mode=real_rounded_5m`) or, if the headroom guard in Step 6.6.1
+  fires, skip the log entirely (`TIMELOG_SKIPPED=1`).
+
 ```bash
 END_TS=$(date +%s)
 ELAPSED_MIN=$(( (END_TS - START_TS + 59) / 60 ))   # ceil to minutes
-ROUND=$(jq -r '.time_rounding_minutes // 5' "$CONFIG_FILE")
+ROUND=$(jq -r '.time_rounding_minutes // 5'      "$CONFIG_FILE")
+THRESHOLD=$(jq -r '.round_threshold_minutes // 4' "$CONFIG_FILE")
+MIN_LOG=$(jq -r '.min_log_minutes // 1'          "$CONFIG_FILE")
 ROUND_SECS=$(( ROUND * 60 ))
-DURATION_MIN=$(( ((ELAPSED_MIN + ROUND - 1) / ROUND) * ROUND ))   # round UP to nearest ROUND
-# Minimum 5 minutes (or ROUND) so trivial tasks still log something
-if [ "$DURATION_MIN" -lt "$ROUND" ]; then DURATION_MIN=$ROUND; fi
+
+# Defensive: if the user set THRESHOLD > ROUND, the "below threshold but
+# rounding applies anyway" zone is incoherent. Treat THRESHOLD > ROUND as
+# "round everything once ELAPSED >= ROUND" — never log raw minutes for
+# ELAPSED values that are already >= ROUND.
+if [ "$THRESHOLD" -gt "$ROUND" ]; then THRESHOLD=$ROUND; fi
+
+DURATION_SOURCE="rounded_nearest"   # rounded_nearest | sub_round_elapsed | floored_min_log
+
+if [ "$ELAPSED_MIN" -ge "$THRESHOLD" ]; then
+  # Round to NEAREST ROUND (half-up). Examples for ROUND=5:
+  #   4 → 5     (4+2)/5 = 1 → 5
+  #   6 → 5     (6+2)/5 = 1 → 5
+  #   7 → 5     (7+2)/5 = 1 → 5
+  #   8 → 10    (8+2)/5 = 2 → 10
+  #   12 → 10   (12+2)/5 = 2 → 10
+  #   13 → 15   (13+2)/5 = 3 → 15
+  HALF=$(( ROUND / 2 ))
+  DURATION_MIN=$(( ((ELAPSED_MIN + HALF) / ROUND) * ROUND ))
+  # Never log a 0-minute entry — if rounding collapsed to 0 (only possible
+  # when ROUND==1 and ELAPSED==0, which is also caught by the MIN_LOG path),
+  # bump up to ROUND.
+  if [ "$DURATION_MIN" -lt "$ROUND" ]; then DURATION_MIN=$ROUND; fi
+  DURATION_SOURCE="rounded_nearest"
+elif [ "$ELAPSED_MIN" -ge "$MIN_LOG" ]; then
+  # Below the rounding threshold but worth logging — write the raw minutes.
+  # Example with defaults (THRESHOLD=4, ROUND=5, MIN_LOG=1):
+  #   1 min →  1 min   (raw, sub-round)
+  #   2 min →  2 min   (raw, sub-round)
+  #   3 min →  3 min   (raw, sub-round)
+  #   4 min →  5 min   (round-to-nearest — handled by the branch above)
+  DURATION_MIN=$ELAPSED_MIN
+  DURATION_SOURCE="sub_round_elapsed"
+  SUB_ROUND_TIMELOGS+=("${TASK_ID}: ${DURATION_MIN}m (elapsed below ${THRESHOLD}m threshold)")
+else
+  # Floor — implementation finished faster than MIN_LOG; log the floor so the
+  # session still produces a trace of this task.
+  DURATION_MIN=$MIN_LOG
+  DURATION_SOURCE="floored_min_log"
+fi
 ```
 
-If `time_mode == "ask"` → **AskUserQuestion** with the measured `DURATION_MIN` as the suggested answer; let the user override.
+Both `rounded_nearest` and `sub_round_elapsed` results may still be
+**clamped or skipped** by the future-timestamp guard in Step 6.6.1 below —
+the elapsed time is *what the work cost*, the headroom is *what fits
+before `now()`* and the smaller of the two wins. The `DURATION_SOURCE`
+flag plumbs through to Step 7 so the user can see why an entry ended up
+sub-round.
+
+If `time_mode == "ask"` → **AskUserQuestion** with the measured `DURATION_MIN` as the suggested answer; let the user override. The user's override is taken as-is — no extra rounding — because at that point the user has explicitly approved a specific minute count.
 
 ### 6.6.1 Future-timestamp guard (hard rule)
 
 The session cursor advances by *logged* minutes, not by *real* minutes — so on a fast run where the model produces work much faster than wall-clock time would allow, the cursor drifts into the future. Teamwork accepts those POSTs without complaint (timesheets can legally hold future entries), but the resulting timesheet is useless for billing and confuses anyone reading it.
 
-Cap `DURATION_MIN` so the resulting log window ends at or before `now()`. v1.2.0 adds a **sub-rounding fallback**: when the remaining headroom is smaller than `time_rounding_minutes` (default 5) but at least `min_log_minutes` (default 1), the skill writes a smaller-than-round entry instead of skipping. The cursor advances by exactly that amount, so the next log starts where this one ended — sequence is preserved, only the cosmetic 5-min alignment is broken for this single entry.
+Cap `DURATION_MIN` (as computed in Step 6.6) so the resulting log window ends at or before `now()`. v1.3.0 simplifies the clamp logic now that Step 6.6 already produces a fully-decided duration (round-up, sub-round-from-elapsed, or floored-to-min-log). The clamp is "headroom-aware" but **does not re-round** — if Step 6.6 said 3 min (sub-round) and headroom is 10 min, the log stays 3 min. If Step 6.6 said 10 min (round-up) and headroom is 7 min, the log is clamped to 7 min and the entry becomes a sub-round headroom clamp.
 
 ```bash
 NOW=$(date +%s)
+# MIN_LOG was already read in Step 6.6; re-read here defensively in case
+# Step 6.6 was skipped (time_mode=ask override).
 MIN_LOG=$(jq -r '.min_log_minutes // 1' "$CONFIG_FILE")
 
-# Exact minutes of headroom (NOT rounded down) and round-aligned ceiling.
+# Exact minutes of headroom (NOT rounded down).
 HEADROOM_SECS=$(( NOW - SESSION_CURSOR_TS ))
 if [ "$HEADROOM_SECS" -lt 0 ]; then HEADROOM_SECS=0; fi
 HEADROOM_MIN_RAW=$(( HEADROOM_SECS / 60 ))
-HEADROOM_MIN_ROUND=$(( (HEADROOM_MIN_RAW / ROUND) * ROUND ))
 
 TIMELOG_SKIPPED=0
-TIMELOG_SUB_ROUND=0
+# TIMELOG_SUB_ROUND may already be 1 from Step 6.6 (elapsed below threshold).
+TIMELOG_SUB_ROUND=${TIMELOG_SUB_ROUND:-0}
 
 if [ "$HEADROOM_MIN_RAW" -lt "$MIN_LOG" ]; then
   echo "  ⚠ session cursor at $(date -r "$SESSION_CURSOR_TS" +%H:%M) is at/past now ($(date -r "$NOW" +%H:%M)); headroom ${HEADROOM_MIN_RAW}m < min_log_minutes (${MIN_LOG}m) — skipping timelog for task ${TASK_ID}" >&2
   TIMELOG_SKIPPED=1
   SKIPPED_TIMELOGS+=("${TASK_ID} (cursor caught up with real time)")
-elif [ "$HEADROOM_MIN_ROUND" -ge "$ROUND" ]; then
-  # Normal round-aligned mode (legacy v1.1.x behaviour).
-  if [ "$DURATION_MIN" -gt "$HEADROOM_MIN_ROUND" ]; then
-    echo "  ⚠ measured ${DURATION_MIN}m would overshoot now() — clamping to ${HEADROOM_MIN_ROUND}m so the timelog stays in the past" >&2
-    CLAMPED_TIMELOGS+=("${TASK_ID}: ${DURATION_MIN}m → ${HEADROOM_MIN_ROUND}m")
-    DURATION_MIN=$HEADROOM_MIN_ROUND
-  fi
-else
-  # Sub-rounding fallback (v1.2.0): not enough headroom for a full ROUND-multiple,
-  # but >= min_log_minutes — log what fits so we don't lose this task's record.
-  echo "  ℹ sub-rounding log for task ${TASK_ID}: headroom ${HEADROOM_MIN_RAW}m < ROUND ${ROUND}m, writing ${HEADROOM_MIN_RAW}m anyway" >&2
-  TIMELOG_SUB_ROUND=1
-  SUB_ROUND_TIMELOGS+=("${TASK_ID}: ${HEADROOM_MIN_RAW}m (below ${ROUND}m rounding step)")
+elif [ "$DURATION_MIN" -gt "$HEADROOM_MIN_RAW" ]; then
+  # The Step 6.6 duration (whether round-up or sub-round-from-elapsed) does
+  # not fit before now() — clamp to the exact headroom in raw minutes. We do
+  # NOT re-round to ROUND here because that could short-change a 7-min-headroom
+  # round-up entry by logging only 5 min, or skip a 3-min headroom entirely.
+  # Logging the exact headroom is more honest and keeps the cursor in sync.
+  echo "  ⚠ measured ${DURATION_MIN}m would overshoot now() — clamping to ${HEADROOM_MIN_RAW}m so the timelog stays in the past" >&2
+  CLAMPED_TIMELOGS+=("${TASK_ID}: ${DURATION_MIN}m → ${HEADROOM_MIN_RAW}m")
   DURATION_MIN=$HEADROOM_MIN_RAW
+fi
+
+# Final classification: is DURATION_MIN a clean multiple of ROUND? If not,
+# mark it as sub-round so Step 7 surfaces the entry. Step 6.6 may have
+# already added a SUB_ROUND_TIMELOGS row with the "elapsed below threshold"
+# reason — only add the "clamped by headroom guard" row if no row exists for
+# this task yet, so the user sees one reason per task.
+if [ "${TIMELOG_SKIPPED:-0}" = "0" ] && [ $(( DURATION_MIN % ROUND )) -ne 0 ]; then
+  TIMELOG_SUB_ROUND=1
+  if ! printf '%s\n' "${SUB_ROUND_TIMELOGS[@]}" | grep -q "^${TASK_ID}:"; then
+    SUB_ROUND_TIMELOGS+=("${TASK_ID}: ${DURATION_MIN}m (clamped by headroom guard)")
+  fi
 fi
 ```
 
 Why this matters: without the guard, a fast run will silently produce timesheet entries with start/end times that have not happened yet. The PM reads "16:00 — refactor done" at 13:30 and rightly asks how that is possible.
 
-`TIMELOG_SKIPPED=1` plumbs through Step 6.8 — the POST is skipped, the cursor is **not** advanced, and Step 6.8.5 (board move to *Internal testing*) is **also** skipped because the task is not yet considered finished from a billing standpoint. `TIMELOG_SUB_ROUND=1` does NOT skip — the log goes through normally; only the duration is below `ROUND`, and Step 7 surfaces `SUB_ROUND_TIMELOGS` alongside the skipped/clamped lists so the user knows which entries broke the 5-min cosmetic alignment.
+`TIMELOG_SKIPPED=1` plumbs through Step 6.8 — the POST is skipped, the cursor is **not** advanced, and Step 6.8.5 (board move to *Internal testing*) is **also** skipped because the task is not yet considered finished from a billing standpoint. `TIMELOG_SUB_ROUND=1` does NOT skip — the log goes through normally; only the duration is below `ROUND` (or is not a clean multiple of `ROUND`), and Step 7 surfaces `SUB_ROUND_TIMELOGS` alongside the skipped/clamped lists so the user knows which entries broke the 5-min cosmetic alignment and why (`elapsed below threshold` vs `clamped by headroom guard`).
 
 Initialize the accounting arrays once at the start of the worker loop:
 
@@ -1400,6 +2098,8 @@ Followed by a short status block:
 ```
 Time cursor: <TIME_CURSOR_SOURCE>           e.g. "last_timelog @ 10:50"
                                             or  "skill start (first log of day)"
+Tasklist filter (v1.3.0):                     <"To Do" + me — N implemented, M analyse-only, K dropped> | <disabled / single-task URL>
+Analyse-only tasks (not touched):             <list of [#id] title from ANALYSE_ONLY_TASKS or none>
 Timelogs skipped (cursor caught up with now): <list from SKIPPED_TIMELOGS or none>
 Timelogs below 5-min rounding (sub-round):    <list from SUB_ROUND_TIMELOGS or none>
 Timelogs clamped to fit before now:           <list from CLAMPED_TIMELOGS or none>
@@ -1486,6 +2186,290 @@ After Step 7's summary and Step 8's optional verification handoff:
 > Time logs were written to Teamwork for each task; cards were moved on the board per project configuration.
 > If the verification step reported any ❌ failures, consider fixing those first before pushing.
 
+When running in a worktree, the push reminder above is followed by the
+worktree handoff in Step 9.5 — which may fully handle the merge / push for
+the user.
+
+---
+
+## Step 9.5 — Worktree handoff (v1.3.0)
+
+The classic failure mode this step closes: the skill ran in a worktree
+(`.claude/worktrees/<name>`), committed N tasks to a worktree-local branch,
+and ended cleanly. The commits **never reach `main`** unless the user
+remembers to merge them by hand. With Claude Code launching background
+runs in worktrees more aggressively, this loop has to close inside the
+skill itself.
+
+**Skip this step entirely when any of these hold:**
+- `config.worktree_handoff.enabled == false`
+- The user passed `--worktree-handoff=leave`
+- `WT_RUN_IN_WORKTREE != 1` (from Step 5.1 — we are in the main checkout,
+  nothing to merge)
+- `config.worktree_handoff.skip_if_no_commits == true` AND
+  `git rev-parse HEAD == WT_HEAD_BEFORE` (no new commits this run)
+- The run was cancelled at plan approval (Step 4) — nothing to wrap up
+- Every implemented task ended in aborted / skipped / `TIMELOG_OK=0` (no
+  commits actually landed)
+
+### Step 9.5.1 — Compute new commits
+
+```bash
+WT_NEW_HEAD=$(git rev-parse HEAD 2>/dev/null || echo "")
+WT_NEW_COMMITS=""
+WT_NEW_COUNT=0
+
+if [ -n "$WT_HEAD_BEFORE" ] && [ -n "$WT_NEW_HEAD" ] && [ "$WT_HEAD_BEFORE" != "$WT_NEW_HEAD" ]; then
+  WT_NEW_COMMITS=$(git log --oneline "${WT_HEAD_BEFORE}..${WT_NEW_HEAD}" 2>/dev/null)
+  # `echo "" | wc -l` returns 1 on macOS/Linux (the trailing newline counts).
+  # Guard the empty case explicitly so WT_NEW_COUNT is genuinely 0 when
+  # `git log` produced no rows.
+  if [ -z "$WT_NEW_COMMITS" ]; then
+    WT_NEW_COUNT=0
+  else
+    WT_NEW_COUNT=$(printf '%s\n' "$WT_NEW_COMMITS" | grep -c .)
+  fi
+fi
+
+# Bail if no new commits and skip_if_no_commits is on (the default).
+# WT_HANDOFF_DONE acts as a short-circuit flag — every subsequent sub-step
+# checks it at the top and returns early so we never render the action
+# prompt for an empty commit set.
+WT_HANDOFF_DONE=0
+SKIP_IF_EMPTY=$(jq -r '.worktree_handoff.skip_if_no_commits // true' "$CONFIG_FILE")
+if [ "$WT_NEW_COUNT" = "0" ] && [ "$SKIP_IF_EMPTY" = "true" ]; then
+  echo "  ℹ worktree has no new commits since the run started — skipping handoff." >&2
+  WT_HANDOFF_RESULT="skipped_no_commits"
+  WT_HANDOFF_DONE=1
+fi
+```
+
+### Step 9.5.2 — Decide the action
+
+**Short-circuit:** Steps 9.5.2 through 9.5.7 all run inside an outer
+`if [ "${WT_HANDOFF_DONE:-0}" != "1" ]; then … fi` block so a Step 9.5.1
+"no new commits — skip" decision flows through to Step 10 without
+rendering any prompt. The model treats `WT_HANDOFF_DONE=1` as the
+single early-exit flag for the whole 9.5 section.
+
+
+Read `worktree_handoff.default_action` (default `ask`). CLI flag
+`--worktree-handoff=…` overrides config. Possible values:
+
+- `ask` (default) → render an **AskUserQuestion** with the four options
+  below.
+- `merge` → skip the action question, go straight to target selection in
+  Step 9.5.3.
+- `push` → skip the action question, push the current branch to
+  `worktree_handoff.push_remote` (default `origin`), do not merge.
+- `leave` → no-op, fall through to Step 10.
+
+When `default_action=ask`, the question is:
+
+> "Run finished in worktree `<CURRENT_WT>` on branch `<CURRENT_BRANCH>`
+>  with **<WT_NEW_COUNT>** new commits this session:
+>
+>  ```
+>  <first 5 lines of WT_NEW_COMMITS, ellipsis if more>
+>  ```
+>
+>  What do you want to do with them?"
+
+Options (single-select):
+
+1. **Merge into `<WT_PARENT_BRANCH>`** *(default when one is detected)* —
+   fast-forward if possible, else create a merge commit, then delete the
+   worktree's branch + the worktree itself.
+2. **Merge into a different branch…** — opens a follow-up
+   AskUserQuestion in Step 9.5.3 with `main`, `master`, `<WT_PARENT_BRANCH>`,
+   *Other (free text)* as options.
+3. **Push the branch to `<push_remote>` for a PR** — `git push -u
+   <remote> <branch>`, leave both the branch and the worktree alone so
+   the user can open a PR manually. Step 10 cleanup will still ask about
+   the worktree afterwards.
+4. **Leave as-is — I will handle the handoff manually.** — no-op.
+5. **Cherry-pick specific commits into a target branch** — power option,
+   triggers Step 9.5.5.
+
+### Step 9.5.3 — Target selection (only for `merge` actions)
+
+Read `worktree_handoff.default_target` (default `ask`).
+
+- `ask` → **AskUserQuestion** with options:
+  - *Parent branch (`<WT_PARENT_BRANCH>`)* — default-highlighted when
+    detected.
+  - *Default branch (`<DEFAULT_BRANCH>` from `origin/HEAD` / `main`)* —
+    only if different from parent.
+  - *Other branch* (free text) — user types a branch name; the skill
+    validates it exists locally before continuing.
+- `parent` → use `WT_PARENT_BRANCH` without asking.
+- `main` → use the resolved default branch.
+- `<any branch name>` → use that exact name (validate it exists; if not,
+  fall back to `ask`).
+
+Store the resolved target in `WT_MERGE_TARGET`.
+
+### Step 9.5.4 — Execute the merge
+
+```bash
+STRATEGY=$(jq -r '.worktree_handoff.merge_strategy // "ff_else_merge"' "$CONFIG_FILE")
+DELETE_BRANCH=$(jq -r '.worktree_handoff.delete_branch_after_merge // true' "$CONFIG_FILE")
+DELETE_WT=$(jq -r     '.worktree_handoff.delete_worktree_after_merge // true' "$CONFIG_FILE")
+
+# All git operations target the MAIN repo. We can run `git -C "$MAIN_REPO"`
+# because the worktree branch is visible there too (worktrees share the
+# object database).
+TARGET_BRANCH="$WT_MERGE_TARGET"
+
+# Refuse merge if the target's working tree (in the main checkout) is dirty —
+# we cannot safely change the main checkout's HEAD without losing the user's
+# uncommitted work. Surface and fall back to "push branch instead".
+if [ -n "$(git -C "$MAIN_REPO" status --porcelain 2>/dev/null)" ]; then
+  echo "  ⚠ main checkout has uncommitted changes — cannot merge safely. Falling back to push only." >&2
+  WT_HANDOFF_RESULT="push_fallback_dirty_main"
+  git -C "$CURRENT_WT" push -u "$(jq -r '.worktree_handoff.push_remote // "origin"' "$CONFIG_FILE")" "$CURRENT_BRANCH" 2>/dev/null
+else
+  # Switch the main repo to the target branch and merge.
+  git -C "$MAIN_REPO" checkout "$TARGET_BRANCH" 2>/tmp/wth_err || {
+    echo "  ⚠ failed to checkout '${TARGET_BRANCH}' in main repo: $(cat /tmp/wth_err)" >&2
+    WT_HANDOFF_RESULT="merge_failed_checkout"
+  }
+
+  if [ "${WT_HANDOFF_RESULT:-}" != "merge_failed_checkout" ]; then
+    # Capture each branch's exit code into MERGE_RC explicitly. We do NOT
+    # test `$?` after `esac` because the exit code that bubbles up depends
+    # on which branch ran AND whether that branch ended in an `if/fi`
+    # block (whose `fi` reports the last inner command). Setting MERGE_RC
+    # inside each arm keeps the contract local and unambiguous.
+    MERGE_RC=1
+    case "$STRATEGY" in
+      ff_only)
+        git -C "$MAIN_REPO" merge --ff-only "$CURRENT_BRANCH" 2>/tmp/wth_err
+        MERGE_RC=$?
+        ;;
+      no_ff)
+        git -C "$MAIN_REPO" merge --no-ff --no-edit "$CURRENT_BRANCH" 2>/tmp/wth_err
+        MERGE_RC=$?
+        ;;
+      squash)
+        if git -C "$MAIN_REPO" merge --squash "$CURRENT_BRANCH" 2>/tmp/wth_err; then
+          git -C "$MAIN_REPO" commit --no-edit -m "Squashed merge of ${CURRENT_BRANCH} via /teamwork-task" 2>>/tmp/wth_err
+          MERGE_RC=$?
+        else
+          MERGE_RC=$?
+        fi
+        ;;
+      ff_else_merge|*)
+        # Default — try fast-forward, fall back to a no-edit merge commit.
+        if git -C "$MAIN_REPO" merge --ff-only "$CURRENT_BRANCH" 2>/dev/null; then
+          MERGE_RC=0  # FF succeeded
+        else
+          git -C "$MAIN_REPO" merge --no-edit "$CURRENT_BRANCH" 2>/tmp/wth_err
+          MERGE_RC=$?
+        fi
+        ;;
+    esac
+
+    if [ "$MERGE_RC" -eq 0 ]; then
+      WT_HANDOFF_RESULT="merged"
+      WT_HANDOFF_TARGET="$TARGET_BRANCH"
+
+      # Delete the worktree branch + the worktree itself if configured.
+      if [ "$DELETE_WT" = "true" ]; then
+        git -C "$MAIN_REPO" worktree remove "$CURRENT_WT" 2>/tmp/wth_err \
+          && WT_HANDOFF_DELETED_WORKTREE=1 \
+          || echo "  ⚠ could not remove worktree '${CURRENT_WT}' (you may still be inside it): $(cat /tmp/wth_err)" >&2
+      fi
+
+      if [ "$DELETE_BRANCH" = "true" ]; then
+        # Use -d so we refuse if the branch has unmerged commits (sanity belt).
+        git -C "$MAIN_REPO" branch -d "$CURRENT_BRANCH" 2>/dev/null \
+          && WT_HANDOFF_DELETED_BRANCH=1
+      fi
+    else
+      WT_HANDOFF_RESULT="merge_failed"
+      echo "  ⚠ merge failed: $(cat /tmp/wth_err)" >&2
+      echo "  ℹ leaving the worktree branch in place so you can resolve manually." >&2
+    fi
+  fi
+fi
+```
+
+If the merge fails (conflicts, non-FF when `ff_only`, etc.), **do not**
+auto-resolve. Surface the error, leave the worktree intact, and let the
+user finish manually. Step 10 will still offer to clean up other
+worktrees but will skip this one.
+
+### Step 9.5.5 — Cherry-pick path (power option)
+
+When the user picks "Cherry-pick specific commits", render
+**AskUserQuestion** with a multi-select listing every commit from
+`WT_NEW_COMMITS` (short hash + first 60 chars of subject). Picked commits
+are cherry-picked into the user-selected target branch in chronological
+order:
+
+```bash
+git -C "$MAIN_REPO" checkout "$TARGET_BRANCH"
+for SHA in $WT_PICKED_SHAS; do
+  git -C "$MAIN_REPO" cherry-pick "$SHA" || {
+    echo "  ⚠ cherry-pick of $SHA failed — pausing." >&2
+    break
+  }
+done
+```
+
+Cherry-pick conflicts are non-recoverable inside the skill — surface the
+state (`git status` output), abort, and let the user resolve.
+
+### Step 9.5.6 — Push-only path
+
+When the user picks "Push the branch", run:
+
+```bash
+REMOTE=$(jq -r '.worktree_handoff.push_remote // "origin"' "$CONFIG_FILE")
+git -C "$CURRENT_WT" push -u "$REMOTE" "$CURRENT_BRANCH"
+WT_HANDOFF_RESULT="pushed"
+WT_HANDOFF_PUSH_REMOTE="$REMOTE"
+```
+
+Print the remote URL of the pushed branch so the user can open the PR
+page in one click (GitHub / GitLab / Bitbucket all surface a "compare &
+PR" link on the next visit). Do **not** delete the branch or the
+worktree on this path — the user explicitly asked to keep them.
+
+### Step 9.5.7 — Plumb result into Step 10 and Step 7
+
+`WT_HANDOFF_RESULT` is consumed by:
+
+- **Step 10 cleanup** — if `merged` and `WT_HANDOFF_DELETED_WORKTREE=1`,
+  the current worktree is already gone; Step 10 still scans for the
+  rest. If `pushed` or `leave`, Step 10 lists the current worktree under
+  the *current — never auto-removed* category, same as today.
+- **Step 7 final summary** — append a `Worktree handoff:` line with the
+  resolved result (`merged into main (FF)`, `merged into feature/foo
+  (merge commit, 3 commits)`, `pushed to origin`, `left as-is`,
+  `merge_failed: <reason>`, `skipped_no_commits`). The user sees in one
+  glance whether the run's commits are safely in their final home.
+
+### Step 9.5.8 — Edge cases handled
+
+- **No new commits this run** → skipped silently (with the default
+  `skip_if_no_commits=true`).
+- **Main checkout is dirty** → cannot safely change its HEAD, fall back
+  to `push_fallback_dirty_main` (push the branch, do not merge). The
+  user gets a clear warning.
+- **`WT_PARENT_BRANCH` could not be detected** → the *Merge into parent*
+  option is hidden; the user has to pick *Merge into a different branch…*
+  with explicit input.
+- **The current worktree's branch is also checked out somewhere else**
+  (Claude Code multi-window) → `git branch -d` will refuse. The error is
+  caught and surfaced; the worktree itself is still removed. The branch
+  is left for the user to clean up.
+- **CI / unattended run** → set `default_action=merge` and
+  `default_target=parent` in config (no `AskUserQuestion` fires). Pair
+  with `delete_branch_after_merge=true` and
+  `delete_worktree_after_merge=true` for a fully hands-off pipeline.
+
 ---
 
 ## Step 10 — Worktree cleanup (end-of-run housekeeping)
@@ -1497,6 +2481,7 @@ Skip this step when any of these hold:
 - The user passed `--worktree-cleanup=false`
 - The run was cancelled at plan approval (Step 4) — nothing to wrap up
 - The repo has only the main worktree and no other entries (and `config.worktree_cleanup.report_when_empty == false`)
+- Step 9.5 already merged + deleted the current worktree (`WT_HANDOFF_RESULT=merged` AND `WT_HANDOFF_DELETED_WORKTREE=1`) **and** there are no other worktrees in the repo — the only worktree we care about was just removed, no need to re-ask.
 
 ### Step 10.1 — Discover and classify worktrees
 
@@ -1572,6 +2557,13 @@ done
 ```
 
 ### Step 10.2 — Decide what to offer
+
+If `WT_HANDOFF_RESULT == "merged"` and `WT_HANDOFF_DELETED_WORKTREE == 1`,
+the entry for `CURRENT_WT` is filtered out of `$WT_TSV` before
+categorisation — git will still list it for a moment until the next
+`git worktree list --porcelain` refresh, but we know it is already gone and
+the user has been asked about it once already in Step 9.5. Avoid a
+double-question.
 
 Categorize entries from `$WT_TSV`:
 

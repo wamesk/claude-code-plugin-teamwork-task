@@ -10,7 +10,22 @@ entries. Push to remote is intentionally left to the user.
 
 Part of the [`wame`](https://github.com/wamesk/claude-code) Claude Code plugin marketplace.
 
-**Current version:** 1.1.0 — see [`CHANGELOG.md`](CHANGELOG.md) for the full release history.
+**Current version:** 1.3.0 — see [`CHANGELOG.md`](CHANGELOG.md) for the full release history.
+
+---
+
+## What's new in 1.3.0
+
+- **Tasklist filter (To Do + me)** — for **tasklist URLs**, only tasks in the board column `To Do` (exact, case-sensitive) AND assigned to the current Teamwork user are actually implemented. The rest of the tasklist is still fetched and rendered in the plan with a 1–2 sentence *Quick read* opinion, but the worker loop skips every mutation (no commit, no time log, no board move). Solves the common multi-repo case where a single Teamwork project holds a Laravel backend + an Ionic frontend owned by different developers — without the filter, running `/teamwork-task` from the backend repo would implement the frontend developer's tasks in the wrong codebase.
+- **Single-task URLs deliberately bypass the filter.** When the user opens a specific task by ID, we honour that intent regardless of which column the task sits in or who it is assigned to.
+- **Three new CLI flags** for per-run overrides: `--tasklist-filter=true|false`, `--tasklist-todo-stage=<name>`, `--tasklist-only-mine=true|false`.
+- **Plan-approval gate gains two new options:** *Promote an analyse-only task to implement* (flip one or more skipped tasks back to the implement set) and *Disable the tasklist filter for this run* (process everything regardless of stage/assignee).
+- Step 7 final summary now lists the filter activity and the analyse-only task IDs so the run report is honest about what was and was not implemented.
+- **Honest time logs in both directions (`round_threshold_minutes`, default `4`).** Up to v1.2.0 every entry rounded **up** to ≥ 5 min — a 30-second README typo fix got billed as 5, an 11-min hotfix as 15 (a 36 % over-bill). v1.3.0 splits the decision into two zones: elapsed below the threshold logs as raw minutes (1, 2, 3); elapsed at or above the threshold rounds to the **nearest** 5-min step. Concretely: 4 → 5, 5 → 5, 6 → 5, 7 → 5, 8 → 10, 9 → 10, 11 → 10, 12 → 10, 13 → 15, 14 → 15. Set the threshold equal to `time_rounding_minutes` (e.g. both `5`) to recover the pre-1.3.0 always-round-up behaviour.
+- **Empty-result message for the tasklist filter.** If the v1.3.0 "To Do" + me filter ends up with 0 tasks to implement, the skill explains *which rules* produced the empty set, *per-task reasons*, and *most common causes*, then asks a focused prompt: disable the filter, pick analyse-only tasks to promote, change the stage name, toggle the assignee check off, or cancel. No more silent "skill did nothing" runs.
+- **Worktree handoff at end of run (Step 9.5).** When the skill executes inside a git worktree, every commit lands on the worktree's branch and never reaches `main` on its own. v1.3.0 asks at the end of the run what to do with those commits: *Merge into a target branch* (default — FF if possible, fall back to merge commit; target asked separately as parent / main / custom), *Push the branch for a PR*, *Leave as-is*, or *Cherry-pick specific commits*. On a successful merge the worktree branch + directory are removed by default. Disable with `--worktree-handoff=leave` or `"worktree_handoff": {"enabled": false}` for runs where you want the v1.2.x "leave it all in the worktree" behaviour back.
+
+The 1.3.0 migration is automatic and idempotent — your existing config gains the `tasklist_filter` block on the next run, with safe defaults.
 
 ---
 
@@ -89,6 +104,11 @@ Optional flags (override the saved config **for this run only**, not persisted):
 - `--auto-commit=always` — commit and log without prompting, no matter how risky the diff looks.
 - `--auto-commit=when_safe` — ask only for UI/template files or large diffs (default).
 - `--auto-commit=never` — always prompt before committing.
+- `--tasklist-filter=true|false` — **v1.3.0**, tasklist URLs only: filter implementation set to "To Do" + assigned to current user (default `true`). Single-task URLs ignore this flag.
+- `--tasklist-todo-stage=<name>` — override the column name used by the tasklist filter (default `"To Do"`, case-sensitive).
+- `--tasklist-only-mine=true|false` — toggle the assignee check independently of the stage check (default `true`).
+- `--worktree-handoff=ask|merge|push|leave` — **v1.3.0**, only when running inside a git worktree: what to do with the worktree's commits at end of run (default `ask`). `merge` = fast-forward / merge into a target branch; `push` = push the branch for a PR; `leave` = no-op.
+- `--worktree-target=ask|parent|main|<branch>` — when `--worktree-handoff=merge`, decide the target branch (default `ask`).
 
 ## What the plugin does, step by step
 
@@ -156,13 +176,97 @@ File: `~/.claude/plugins/data/teamwork-task-wamesk/config.json`
 | `board_workflow.match_mode`               | `case_insensitive`                                                       | Reserved for future variants; today it is always case-insensitive.                                                                                                                     |
 | `time_mode`                               | `real_rounded_5m`                                                        | `real_rounded_5m` measures actual time; `ask` prompts after every task.                                                                                                                |
 | `time_rounding_minutes`                   | `5`                                                                      | Rounding step (minutes). Applies to both `real_rounded_5m` durations and the session cursor alignment.                                                                                |
+| `round_threshold_minutes`                 | `4`                                                                      | **v1.3.0** — elapsed `< threshold` logs as raw minutes (1, 2, 3); elapsed `>= threshold` rounds to the **nearest** `time_rounding_minutes` step. Set equal to `time_rounding_minutes` to recover the pre-1.3.0 always-round-up behaviour. Old name `round_up_threshold_minutes` is auto-migrated. |
+| `min_log_minutes`                         | `1`                                                                      | **v1.2.0** — smallest entry the skill will write. Lower than `round_threshold_minutes` enables the raw-minutes sub-round zone.                                                          |
 | `branching_mode`                          | `current_branch`                                                         | `current_branch` or `new_feature_branch`.                                                                                                                                              |
 | `default_language`                        | `sk`                                                                     | Language for the Teamwork time-log description (Slovak by default).                                                                                                                    |
 | `auto_complete_finished_tasks`            | `false`                                                                  | If `true`, the plugin marks each task as completed in TW after the commit + time log. Independent from board moves.                                                                    |
 | `skip_completed_tasks`                    | `true`                                                                   | If `true`, tasks already marked as completed in TW are skipped when iterating a tasklist.                                                                                              |
 | `is_billable_by_default`                  | `true`                                                                   | Sets `isbillable` on every logged time entry.                                                                                                                                          |
+| `tasklist_filter.enabled`                 | `true`                                                                   | **v1.3.0** — for tasklist URLs only, filter to tasks in `tasklist_filter.todo_stage` AND assigned to the current user. Single-task URLs always bypass.                                  |
+| `tasklist_filter.todo_stage`              | `"To Do"`                                                                | Name of the board column that gates implementation. Matched per `todo_stage_match_mode`.                                                                                               |
+| `tasklist_filter.todo_stage_match_mode`   | `case_sensitive`                                                         | `case_sensitive` (default, strict match — `to do` does not match `To Do`) or `case_insensitive` (loose match).                                                                         |
+| `tasklist_filter.only_assigned_to_me`     | `true`                                                                   | Also require the current user to be in `task.assignees`. When `false`, only the stage check applies.                                                                                   |
+| `tasklist_filter.analyze_all_tasks`       | `true`                                                                   | When `true`, tasks that fail the filter are rendered in the plan as analyse-only with a *Quick read* line. When `false`, they are dropped entirely.                                    |
+| `tasklist_filter.skip_reason_render`      | `inline`                                                                 | `inline` (default) renders the skip reason next to each analyse-only task in the plan. Other modes reserved for future variants.                                                       |
+| `worktree_handoff.enabled`                | `true`                                                                   | **v1.3.0** — master toggle for the end-of-run worktree handoff. When `false`, the skill never auto-merges or pushes from a worktree.                                                  |
+| `worktree_handoff.default_action`         | `ask`                                                                    | `ask` (default — render an AskUserQuestion), `merge`, `push`, or `leave`.                                                                                                              |
+| `worktree_handoff.default_target`         | `ask`                                                                    | `ask` (default), `parent` (the branch the worktree was created from), `main` (origin/HEAD / main / master / trunk fallback), or a literal branch name.                                 |
+| `worktree_handoff.merge_strategy`         | `ff_else_merge`                                                          | `ff_else_merge` (try fast-forward, fall back to merge commit), `ff_only`, `no_ff`, or `squash`.                                                                                        |
+| `worktree_handoff.delete_branch_after_merge` | `true`                                                                | If `true`, after a successful merge the worktree's branch is deleted with `git branch -d` (refuses if branch has unmerged commits, as a sanity belt).                                  |
+| `worktree_handoff.delete_worktree_after_merge` | `true`                                                              | If `true`, after a successful merge the worktree directory is removed with `git worktree remove`. The cwd may shift back to the main checkout.                                          |
+| `worktree_handoff.push_remote`            | `origin`                                                                 | Remote name used by the "push branch for PR" path and the dirty-main fallback.                                                                                                         |
+| `worktree_handoff.skip_if_no_commits`     | `true`                                                                   | If `true`, Step 9.5 is skipped silently when `HEAD` has not advanced this run (no new commits to hand off).                                                                            |
 
 To change a setting, edit the file directly and rerun the command.
+
+## Worktree handoff (v1.3.0)
+
+When you run `/teamwork-task` inside a **git worktree** — typically because Claude Code launched a background job in `.claude/worktrees/<name>` or because you started the session from a worktree manually — every commit produced by the worker loop lands on the worktree's branch (e.g. `claude/teamwork-task-12345`). Up to v1.2.0 those commits stayed there forever; you had to remember to merge them by hand. v1.3.0 closes that loop in **Step 9.5**, right after the final summary and the optional verification handoff.
+
+### What you are asked
+
+At the end of the run, the skill renders an `AskUserQuestion`:
+
+> Run finished in worktree `.claude/worktrees/foo` on branch `claude/foo` with **N** new commits this session: ⟨short list⟩. What do you want to do with them?
+
+The default options are:
+
+- **Merge into `<parent>`** — fast-forward into the parent branch (the one the worktree was created from) when possible, fall back to a merge commit otherwise. After a successful merge, the worktree's branch and directory are removed (configurable). Recommended for most flows.
+- **Merge into a different branch…** — opens a follow-up question with `main`, the parent branch, and *Other (free text)* so you can point at any local branch.
+- **Push the branch to `origin` for a PR** — `git push -u origin <branch>`; the branch and worktree stay, so you can open a PR manually.
+- **Leave as-is — I will handle the handoff manually** — no-op.
+- **Cherry-pick specific commits into a target branch** — power option; multi-select the commits, pick the target, the skill does the cherry-picks.
+
+### Defaults you can preset for unattended runs
+
+Edit `~/.claude/plugins/data/teamwork-task-wamesk/config.json`:
+
+- `worktree_handoff.default_action = "merge"` — skip the first question.
+- `worktree_handoff.default_target = "parent"` — skip the target question.
+- `worktree_handoff.merge_strategy = "ff_else_merge"` — default.
+- `worktree_handoff.delete_branch_after_merge = true` — default.
+- `worktree_handoff.delete_worktree_after_merge = true` — default.
+
+Combined, this gives you a fully hands-off pipeline: the skill implements, commits, time-logs, moves the board, runs verification, and merges everything back into the parent branch, all in one command.
+
+### Safety rules
+
+- **The main checkout must be clean.** If `git status` on the main repo shows uncommitted changes, Step 9.5 refuses to switch branches there (could lose your work) and falls back to *push-only* — your commits go to `origin/<branch>` and you finish the merge manually.
+- **Merge conflicts pause the run.** The skill never auto-resolves merge conflicts. On failure the worktree is left intact, the error is surfaced, and you can `cd` in and finish manually.
+- **Cherry-pick conflicts pause the run.** Same rule.
+- **`skip_if_no_commits = true`** (default) — if the worker loop did not commit anything (every task aborted / skipped / timelog failed), Step 9.5 is silently skipped. Nothing to merge.
+
+### Bypass
+
+- **Per run:** `--worktree-handoff=leave` (skip entirely) or `--worktree-handoff=push` (skip the merge question).
+- **Persistently:** `"worktree_handoff": {"enabled": false}` in your config.
+- **Single-task runs from the main checkout** never trigger this step — the detection in Step 5.1 marks `WT_RUN_IN_WORKTREE=0` and Step 9.5 is a no-op.
+
+## Tasklist filter (v1.3.0)
+
+For **tasklist** URLs only, the plugin filters which tasks get actually implemented:
+
+- Only tasks **in the board column `To Do`** (matched case-sensitively by default — `to do`, `TO DO`, `ToDo` do **not** match) AND
+- **assigned to the current Teamwork user**
+
+are run through the worker loop. The rest of the tasklist's tasks are still fetched and shown in the plan with a short *Quick read* sanity-check line, but the plugin **never** commits, time-logs, or moves the board card for them.
+
+**Single-task URLs** (`/teamwork-task https://…/tasks/12345`) deliberately **bypass** the filter — when you point at a specific task by ID, the plugin honours that intent regardless of the task's column or assignee.
+
+The motivation is the standard multi-repo Kanban setup: a single Teamwork project commonly contains both a Laravel backend and an Ionic / iOS / Vue frontend, owned by different developers working in different repositories. Without the filter, running `/teamwork-task <tasklist-url>` from the Laravel repo would happily start implementing the frontend developer's tasks in the wrong codebase. The filter narrows the implementation set to what you actually own and is greenlit to work on, while still surfacing teammates' tasks in the same plan so you can sanity-check them in standup.
+
+### How to override
+
+- **Per run:** `--tasklist-filter=false` (process all fetched tasks), `--tasklist-only-mine=false` (skip the assignee check), or `--tasklist-todo-stage="Ready"` (use a different column name).
+- **From the plan-approval prompt:** *Promote an analyse-only task to implement* (flip specific task IDs back to the implement set) or *Disable the tasklist filter for this run*.
+- **Persistently:** edit `~/.claude/plugins/data/teamwork-task-wamesk/config.json` and set `"tasklist_filter": {"enabled": false}`, or change `todo_stage` / `only_assigned_to_me` to whatever your team's convention is.
+
+### Edge cases handled
+
+- **Project has no workflow at all** → filter degrades to "process everything" (no `To Do` to filter by). A one-line note is shown in the plan.
+- **Task has no card / is not on the board** → falls back to `process` so backlog items never get silently stranded.
+- **`/me.json` is unreachable** (token without `users.read` scope, network blip) → assignee check is skipped so you are never silently locked out of your own work; the stage check still applies.
 
 ## Plan modes
 
@@ -308,7 +412,10 @@ If the safety gate at commit time results in **Abort task**, the card stays in *
 Hard rules every entry the plugin writes to Teamwork obeys:
 
 1. **Sequential, non-overlapping entries.** Even though implementation work can overlap in real time (parallel tool calls, interleaved investigations), the time **logged to Teamwork** is laid out strictly back-to-back. The plugin maintains a single *session cursor* that advances by exactly the logged duration after each entry. Result: if task A is logged as `start 10:15, 20 min`, task B will be logged as `start 10:35, …` — never `10:32`, never overlapping `10:25–10:45`.
-2. **Everything aligned to the rounding step (default 5 min).** Both the **duration** and the **start time** are multiples of `time_rounding_minutes`. You will never see a log starting at `:17` or lasting `13 min`; the plugin rounds the duration **up** and aligns the cursor to the nearest 5-minute boundary.
+2. **Round-to-nearest beyond the threshold, raw below it (default 5 min step, 4 min threshold — v1.3.0).** The duration decision is split into two zones controlled by `round_threshold_minutes` (default `4`):
+   - **Elapsed at or above the threshold** rounds to the **nearest** `time_rounding_minutes` step using half-up integer rounding. With defaults (`threshold=4`, `ROUND=5`): 4 → 5, 5 → 5, 6 → 5, 7 → 5, 8 → 10, 9 → 10, 10 → 10, 11 → 10, 12 → 10, 13 → 15, 14 → 15, 15 → 15. This is honest in both directions — 7-min work bills as 5, 8-min work bills as 10. Over many tasks the bias averages out.
+   - **Elapsed strictly below the threshold but at least `min_log_minutes` (default 1)** logs as **raw minutes**. With defaults: 1 → 1, 2 → 2, 3 → 3. The cursor advances by the exact raw amount, so the next log starts off the 5-min grid (e.g. `:17`). This keeps a trivial-edit log honest at 1 min instead of padding it to 5.
+   - Set `round_threshold_minutes` equal to `time_rounding_minutes` (e.g. both `5`) to recover the pre-1.3.0 "always round up to ROUND" behaviour where every entry is ≥ 5 min and the cursor never falls off the 5-min grid.
 3. **Plan time is never logged.** The session cursor starts only after the plan is approved. Time spent on planning, reading the user's clarifications, or waiting for an `AskUserQuestion` response is **not** billed.
 
 ### Time cursor strategy
