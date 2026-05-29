@@ -7,6 +7,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.2.0] - 2026-05-29
+
+**End-of-run worktree housekeeping + sub-rounding timelog fallback.**
+Background sessions, the `EnterWorktree` tool, and the `/teamwork-task`
+skill itself all create git worktrees inside `.claude/worktrees/<name>` —
+but nothing in the existing toolchain ever deletes them automatically
+(the only auto-cleanup is the `EnterWorktree` no-change case). Without an
+explicit cleanup step, every successful background run leaves another
+worktree behind. Step 10 closes that loop. The release also fixes a
+fast-run footgun where the future-timestamp guard skipped *every* timelog
+of a fast model run because the headroom never reached the 5-minute
+rounding step — now a `min_log_minutes`-aware sub-rounding fallback lets
+the skill write smaller entries instead of silently losing the record.
+
+### Added
+
+- **Step 10 — Worktree cleanup (end-of-run housekeeping).** After Step 9's
+  push reminder, the skill enumerates all worktrees of the current
+  repository (`git worktree list --porcelain`), classifies each one
+  (`main`, `current`, `merged-clean`, `unmerged-clean`, `dirty`, `ghost`),
+  and offers to remove the safe ones via **AskUserQuestion**. Removal is
+  two-step: `git worktree remove <path>` then `git branch -d <branch>` (or
+  `-D` after explicit confirmation when the branch has unmerged commits).
+  The current session's own worktree is always excluded. Failures are
+  non-blocking and reported in the Step 7 final summary.
+- **Config block `worktree_cleanup`** with five tunables: `enabled`
+  (default `true`), `auto_remove_merged_clean` (default `false` — always
+  ask), `stale_age_days` (default `14`, used to highlight old worktrees in
+  the question), `ignore_paths` (default `[]`), and `report_when_empty`
+  (default `false`).
+- **CLI flag `--worktree-cleanup=true|false|ask`** for per-run override.
+- **Sub-rounding timelog fallback (Step 6.6.1).** When the real-time
+  headroom between the session cursor and `now()` is smaller than
+  `time_rounding_minutes` (default 5) but at least `min_log_minutes`
+  (default 1), the skill writes a smaller-than-round entry instead of
+  skipping the task entirely. The cursor still advances by the exact
+  logged amount, so the next log resumes seamlessly from where this one
+  ended. Pre-1.2.0 behaviour is recovered by setting `min_log_minutes`
+  equal to `time_rounding_minutes`.
+- **Config key `min_log_minutes`** (default `1`).
+- **Step 7 status block** now surfaces `SUB_ROUND_TIMELOGS` alongside
+  `SKIPPED_TIMELOGS` and `CLAMPED_TIMELOGS` so reviewers can spot the
+  entries that broke the 5-minute cosmetic alignment.
+
+### Why
+
+Two pain points from real production runs:
+
+1. **Worktree accumulation.** `git worktree list` on a long-lived repo
+   after a few weeks of background jobs typically shows 5–10 worktree
+   entries. None are cleaned by git or by Claude Code; users must remember
+   `git worktree remove`. The skill now does it at the same point it
+   already handles per-run housekeeping (board moves, time logs,
+   attachment cleanup) — explicitly, transparently, only with user
+   confirmation for anything that could lose commits.
+2. **Lost timelogs on fast runs.** A run where the model produces work in
+   seconds (not minutes) had every `TIMELOG_SKIPPED` because headroom
+   never reached 5 min from `floor(now)`. The user then either had to
+   manually log each task or re-run the skill later just to catch the
+   cursor up. Sub-rounding fallback writes the few-minute entry so the
+   record survives even on fast runs.
+
+### Notes
+
+- The classification uses the **default branch** of the repo (resolved
+  from `origin/HEAD`, falling back to `main` / `master` / `trunk` /
+  current HEAD). Merged-status is determined by `git merge-base
+  --is-ancestor`, which correctly handles the `+` prefix that appears on
+  branches checked out in other worktrees.
+- Dirty worktrees are listed with a warning but never auto-removed — the
+  user has to handle them manually (`git stash` or commit-and-push first).
+- Sub-rounding logs deliberately break the 5-min start-time alignment for
+  that one entry. The sequence guarantee (cursor advances by exactly the
+  logged minutes) is preserved, so the next log starts at, e.g., 10:37
+  instead of 10:35. Reviewers reading the timesheet see a 2-min entry
+  followed by a 10-min entry — clear breadcrumb that something fast
+  happened.
+
+---
+
 ## [1.1.3] - 2026-05-28
 
 **Ask before assuming.** Two new gates in front of the worker loop close the

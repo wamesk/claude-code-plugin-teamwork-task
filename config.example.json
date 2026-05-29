@@ -88,5 +88,14 @@
     ],
     "filename_hint_pattern": "[A-Za-z0-9_-]+\\.(docx|pdf|xlsx|eml|msg|csv|sql|md|json|txt)\\b",
     "on_block_default": "ask"
+  },
+
+  "min_log_minutes": 1,
+  "worktree_cleanup": {
+    "enabled": true,
+    "auto_remove_merged_clean": false,
+    "stale_age_days": 14,
+    "ignore_paths": [],
+    "report_when_empty": false
   }
 }

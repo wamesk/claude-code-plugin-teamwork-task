@@ -1,8 +1,8 @@
 ---
 name: teamwork-task
-version: 1.1.3
+version: 1.2.0
 description: "Use when the user provides a Teamwork.com URL (tasklist or task) and asks to 'work on these tasks', 'urob tasky z teamworku', 'spracuj tasky z teamwork', 'vypracuj tasky z teamworku', or invokes '/teamwork-task'. Fetches tasks via the Teamwork REST API (v3), pulls task description, attachments, comments (when needed), and file comments for context, **scans the local working tree for unattached specs / samples / DNR docs that match the task keywords and asks the user whether to use them**, **detects gating phrases in the task body (e.g. 'Bez vzorky nemá zmysel písať regex') and pauses with a question before implementing instead of barreling through with synthetic data**, implements tasks one by one in the current repository, moves the task on the board (In progress → Internal testing, with fallback to Testing), commits per task using the TYPE(scope)[<task-id>]: Message convention, and logs time back to Teamwork as sequential, non-overlapping 5-min-aligned entries that pick up from your last timelog of the day. Configurable safety gate asks for review when the diff touches UI/template files or grows beyond 100 lines. When the companion `teamwork-task-test` skill is installed, hands off to it at the very end so each task's acceptance criteria get individually verified before the user pushes. Pauses and asks the user via AskUserQuestion on blockers."
-argument-hint: "<teamwork-url> [--time-mode=real_rounded_5m|ask] [--branching=current_branch|new_feature_branch] [--plan-mode=overview|per_task|none] [--auto-commit=always|when_safe|never] [--test-after=true|false]"
+argument-hint: "<teamwork-url> [--time-mode=real_rounded_5m|ask] [--branching=current_branch|new_feature_branch] [--plan-mode=overview|per_task|none] [--auto-commit=always|when_safe|never] [--test-after=true|false] [--worktree-cleanup=true|false|ask]"
 allowed-tools: [Bash, Read, Write, Edit, Grep, Glob, AskUserQuestion, Skill]
 ---
 
@@ -35,6 +35,7 @@ Optional flags (override config for this run only — not persisted):
 - `--local-discovery=true|false` — scan the working tree for unattached spec/sample files matching task keywords (default `true`, see Step 3.10)
 - `--readiness-gate=true|false` — pause with a question when a task body says it needs an external input that may not yet be available (default `true`, see Step 6.0)
 - `--test-after=true|false` — hand off to `/teamwork-task-test` after a clean finish (default `true`)
+- `--worktree-cleanup=true|false|ask` — at end of run, scan the repo for other worktrees and offer to remove ones that are merged & clean (default `true`, see Step 10)
 
 If `$ARGUMENTS` is empty or does not contain a URL, ask the user via **AskUserQuestion** for the Teamwork URL before doing anything else.
 
@@ -137,6 +138,7 @@ jq '
   (.include_commit_hash_in_log_description //= true) |
   (.time_mode //= "real_rounded_5m") |
   (.time_rounding_minutes //= 5) |
+  (.min_log_minutes //= 1) |
   (.branching_mode //= "current_branch") |
   (.default_language //= "sk") |
   (.auto_complete_finished_tasks //= false) |
@@ -180,6 +182,13 @@ jq '
     ],
     "filename_hint_pattern": "[A-Za-z0-9_-]+\\.(docx|pdf|xlsx|eml|msg|csv|sql|md|json|txt)\\b",
     "on_block_default": "ask"
+  }) |
+  (.worktree_cleanup //= {
+    "enabled": true,
+    "auto_remove_merged_clean": false,
+    "stale_age_days": 14,
+    "ignore_paths": [],
+    "report_when_empty": false
   })
 ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
 chmod 600 "$CONFIG_FILE"
@@ -192,6 +201,10 @@ The `auto_run_tests_after` key (added in 1.1.1) controls whether this skill, on 
 The `local_context_discovery` key (added in 1.1.3) controls Step 3.10 — scanning the working tree for unattached specs / samples that the user dropped into the project folder but did not attach to the Teamwork task. Default is `true`. Disable per run with `--local-discovery=false`.
 
 The `readiness_gate` key (added in 1.1.3) controls Step 6.0 — detecting phrases in the task description that mark an external blocker (e.g. *"Bez vzorky nemá zmysel písať regex"*) and pausing with **AskUserQuestion** before implementing, so the skill does not silently produce code against synthetic placeholders. Default is `true`. Disable per run with `--readiness-gate=false`.
+
+The `worktree_cleanup` key (added in 1.2.0) controls Step 10 — at the end of a successful run, scan the repo for other git worktrees (typically `.claude/worktrees/<name>` left behind by prior background jobs) and offer to delete the ones that are clean and merged into the default branch. Default is `true`. Disable per run with `--worktree-cleanup=false`.
+
+The `min_log_minutes` key (added in 1.2.0) controls Step 6.6.1 — when the real-time headroom between the session cursor and `now()` is smaller than `time_rounding_minutes` (default 5) but at least `min_log_minutes` (default 1), the skill writes a smaller-than-round timelog entry instead of skipping the task entirely. The cursor still advances by the exact logged amount, so the next log resumes seamlessly. Set `min_log_minutes` to the same value as `time_rounding_minutes` to keep the legacy v1.1.x "5-min minimum or skip" behaviour.
 
 ---
 
@@ -1107,36 +1120,52 @@ If `time_mode == "ask"` → **AskUserQuestion** with the measured `DURATION_MIN`
 
 The session cursor advances by *logged* minutes, not by *real* minutes — so on a fast run where the model produces work much faster than wall-clock time would allow, the cursor drifts into the future. Teamwork accepts those POSTs without complaint (timesheets can legally hold future entries), but the resulting timesheet is useless for billing and confuses anyone reading it.
 
-Cap `DURATION_MIN` so the resulting log window ends at or before `now()`:
+Cap `DURATION_MIN` so the resulting log window ends at or before `now()`. v1.2.0 adds a **sub-rounding fallback**: when the remaining headroom is smaller than `time_rounding_minutes` (default 5) but at least `min_log_minutes` (default 1), the skill writes a smaller-than-round entry instead of skipping. The cursor advances by exactly that amount, so the next log starts where this one ended — sequence is preserved, only the cosmetic 5-min alignment is broken for this single entry.
 
 ```bash
 NOW=$(date +%s)
-# How much real-time space is still ahead of the cursor, floored to a ROUND multiple.
+MIN_LOG=$(jq -r '.min_log_minutes // 1' "$CONFIG_FILE")
+
+# Exact minutes of headroom (NOT rounded down) and round-aligned ceiling.
 HEADROOM_SECS=$(( NOW - SESSION_CURSOR_TS ))
 if [ "$HEADROOM_SECS" -lt 0 ]; then HEADROOM_SECS=0; fi
-HEADROOM_MIN=$(( (HEADROOM_SECS / 60 / ROUND) * ROUND ))
+HEADROOM_MIN_RAW=$(( HEADROOM_SECS / 60 ))
+HEADROOM_MIN_ROUND=$(( (HEADROOM_MIN_RAW / ROUND) * ROUND ))
 
 TIMELOG_SKIPPED=0
-if [ "$HEADROOM_MIN" -lt "$ROUND" ]; then
-  echo "  ⚠ session cursor at $(date -r "$SESSION_CURSOR_TS" +%H:%M) is at/past now ($(date -r "$NOW" +%H:%M)) — skipping timelog for task ${TASK_ID}" >&2
+TIMELOG_SUB_ROUND=0
+
+if [ "$HEADROOM_MIN_RAW" -lt "$MIN_LOG" ]; then
+  echo "  ⚠ session cursor at $(date -r "$SESSION_CURSOR_TS" +%H:%M) is at/past now ($(date -r "$NOW" +%H:%M)); headroom ${HEADROOM_MIN_RAW}m < min_log_minutes (${MIN_LOG}m) — skipping timelog for task ${TASK_ID}" >&2
   TIMELOG_SKIPPED=1
   SKIPPED_TIMELOGS+=("${TASK_ID} (cursor caught up with real time)")
-elif [ "$DURATION_MIN" -gt "$HEADROOM_MIN" ]; then
-  echo "  ⚠ measured ${DURATION_MIN}m would overshoot now() — clamping to ${HEADROOM_MIN}m so the timelog stays in the past" >&2
-  CLAMPED_TIMELOGS+=("${TASK_ID}: ${DURATION_MIN}m → ${HEADROOM_MIN}m")
-  DURATION_MIN=$HEADROOM_MIN
+elif [ "$HEADROOM_MIN_ROUND" -ge "$ROUND" ]; then
+  # Normal round-aligned mode (legacy v1.1.x behaviour).
+  if [ "$DURATION_MIN" -gt "$HEADROOM_MIN_ROUND" ]; then
+    echo "  ⚠ measured ${DURATION_MIN}m would overshoot now() — clamping to ${HEADROOM_MIN_ROUND}m so the timelog stays in the past" >&2
+    CLAMPED_TIMELOGS+=("${TASK_ID}: ${DURATION_MIN}m → ${HEADROOM_MIN_ROUND}m")
+    DURATION_MIN=$HEADROOM_MIN_ROUND
+  fi
+else
+  # Sub-rounding fallback (v1.2.0): not enough headroom for a full ROUND-multiple,
+  # but >= min_log_minutes — log what fits so we don't lose this task's record.
+  echo "  ℹ sub-rounding log for task ${TASK_ID}: headroom ${HEADROOM_MIN_RAW}m < ROUND ${ROUND}m, writing ${HEADROOM_MIN_RAW}m anyway" >&2
+  TIMELOG_SUB_ROUND=1
+  SUB_ROUND_TIMELOGS+=("${TASK_ID}: ${HEADROOM_MIN_RAW}m (below ${ROUND}m rounding step)")
+  DURATION_MIN=$HEADROOM_MIN_RAW
 fi
 ```
 
 Why this matters: without the guard, a fast run will silently produce timesheet entries with start/end times that have not happened yet. The PM reads "16:00 — refactor done" at 13:30 and rightly asks how that is possible.
 
-`TIMELOG_SKIPPED=1` plumbs through Step 6.8 — the POST is skipped, the cursor is **not** advanced, and Step 6.8.5 (board move to *Internal testing*) is **also** skipped because the task is not yet considered finished from a billing standpoint. Step 7 surfaces `SKIPPED_TIMELOGS` and `CLAMPED_TIMELOGS` so the user can decide whether to fill in the missing time manually.
+`TIMELOG_SKIPPED=1` plumbs through Step 6.8 — the POST is skipped, the cursor is **not** advanced, and Step 6.8.5 (board move to *Internal testing*) is **also** skipped because the task is not yet considered finished from a billing standpoint. `TIMELOG_SUB_ROUND=1` does NOT skip — the log goes through normally; only the duration is below `ROUND`, and Step 7 surfaces `SUB_ROUND_TIMELOGS` alongside the skipped/clamped lists so the user knows which entries broke the 5-min cosmetic alignment.
 
 Initialize the accounting arrays once at the start of the worker loop:
 
 ```bash
 SKIPPED_TIMELOGS=()
 CLAMPED_TIMELOGS=()
+SUB_ROUND_TIMELOGS=()
 ```
 
 ### 6.6.5 Safety gate — auto-commit or ask?
@@ -1372,6 +1401,7 @@ Followed by a short status block:
 Time cursor: <TIME_CURSOR_SOURCE>           e.g. "last_timelog @ 10:50"
                                             or  "skill start (first log of day)"
 Timelogs skipped (cursor caught up with now): <list from SKIPPED_TIMELOGS or none>
+Timelogs below 5-min rounding (sub-round):    <list from SUB_ROUND_TIMELOGS or none>
 Timelogs clamped to fit before now:           <list from CLAMPED_TIMELOGS or none>
 Attachments skipped (size):                   <list or none>
 Board moves disabled for projects:            <list or none>
@@ -1455,6 +1485,167 @@ After Step 7's summary and Step 8's optional verification handoff:
 > **Push manually when ready:** `git push` (or `git push -u origin <branch>` for a new feature branch).
 > Time logs were written to Teamwork for each task; cards were moved on the board per project configuration.
 > If the verification step reported any ❌ failures, consider fixing those first before pushing.
+
+---
+
+## Step 10 — Worktree cleanup (end-of-run housekeeping)
+
+After Step 7's summary, the optional Step 8 verification handoff, and the Step 9 push reminder, the skill scans the current repository for other git worktrees and offers to delete the ones that are stale. This catches the gradual accumulation of `.claude/worktrees/<name>` directories from prior background runs that nobody ever explicitly removed (worktrees are never auto-deleted by git, by Claude Code, or by this skill's earlier steps).
+
+Skip this step when any of these hold:
+- `config.worktree_cleanup.enabled == false`
+- The user passed `--worktree-cleanup=false`
+- The run was cancelled at plan approval (Step 4) — nothing to wrap up
+- The repo has only the main worktree and no other entries (and `config.worktree_cleanup.report_when_empty == false`)
+
+### Step 10.1 — Discover and classify worktrees
+
+```bash
+WTC_ENABLED=$(jq -r '.worktree_cleanup.enabled // true'                "$CONFIG_FILE")
+WTC_AUTO=$(jq    -r '.worktree_cleanup.auto_remove_merged_clean // false' "$CONFIG_FILE")
+WTC_STALE_DAYS=$(jq -r '.worktree_cleanup.stale_age_days // 14'        "$CONFIG_FILE")
+WTC_REPORT_EMPTY=$(jq -r '.worktree_cleanup.report_when_empty // false' "$CONFIG_FILE")
+
+if [ "$WTC_ENABLED" != "true" ] || [ "${WTC_CLI_OVERRIDE:-}" = "false" ]; then
+  echo "  ℹ Worktree cleanup disabled — skipping Step 10." >&2
+  WTC_RUN=0
+else
+  WTC_RUN=1
+fi
+
+# Resolve the main repo's working directory (handles being run from inside a worktree).
+MAIN_REPO=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null \
+  | sed -E 's|/\.git$||; s|/\.git/worktrees/[^/]+$||')
+CURRENT_WT=$(git rev-parse --show-toplevel 2>/dev/null)
+
+# Best-effort default branch resolution (origin/HEAD when set, else "main", "master", "trunk").
+DEFAULT_BRANCH=$(git -C "$MAIN_REPO" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||')
+[ -z "$DEFAULT_BRANCH" ] && for B in main master trunk; do
+  git -C "$MAIN_REPO" show-ref --verify --quiet "refs/heads/$B" && DEFAULT_BRANCH="$B" && break
+done
+[ -z "$DEFAULT_BRANCH" ] && DEFAULT_BRANCH=$(git -C "$MAIN_REPO" rev-parse --abbrev-ref HEAD 2>/dev/null)
+
+# Bash 3.2-safe parsing of `git worktree list --porcelain` into TSV:
+# path<TAB>branch<TAB>head<TAB>category<TAB>age_days<TAB>size_human
+WT_TSV="/tmp/tw_worktrees_${$}.tsv"
+: > "$WT_TSV"
+
+git -C "$MAIN_REPO" worktree list --porcelain | awk -v RS= '
+  {
+    path = ""; branch = ""; head = "";
+    n = split($0, lines, "\n");
+    for (i = 1; i <= n; i++) {
+      if (lines[i] ~ /^worktree /) { path   = substr(lines[i], 10) }
+      if (lines[i] ~ /^HEAD /)     { head   = substr(lines[i], 6)  }
+      if (lines[i] ~ /^branch /)   { branch = substr(lines[i], 8); sub(/^refs\/heads\//, "", branch) }
+    }
+    if (path != "") print path "\t" branch "\t" head
+  }
+' | while IFS=$'\t' read -r WT_PATH WT_BRANCH WT_HEAD; do
+  CATEGORY=""
+  if [ "$WT_PATH" = "$MAIN_REPO" ];   then CATEGORY="main";    fi
+  if [ "$WT_PATH" = "$CURRENT_WT" ];  then CATEGORY="current"; fi
+  if [ -z "$CATEGORY" ]; then
+    if [ ! -d "$WT_PATH" ]; then
+      CATEGORY="ghost"   # registered but directory was deleted manually
+    elif [ -n "$(git -C "$WT_PATH" status --porcelain 2>/dev/null)" ]; then
+      CATEGORY="dirty"
+    elif [ -n "$WT_BRANCH" ] && git -C "$MAIN_REPO" merge-base --is-ancestor "$WT_BRANCH" "$DEFAULT_BRANCH" 2>/dev/null; then
+      CATEGORY="merged-clean"
+    else
+      CATEGORY="unmerged-clean"
+    fi
+  fi
+
+  if [ -d "$WT_PATH" ]; then
+    LAST_TS=$(git -C "$WT_PATH" log -1 --format=%ct 2>/dev/null || echo 0)
+    NOW_TS=$(date +%s)
+    AGE_DAYS=$(( (NOW_TS - LAST_TS) / 86400 ))
+    SIZE=$(du -sh "$WT_PATH" 2>/dev/null | awk '{print $1}')
+  else
+    AGE_DAYS=0
+    SIZE="-"
+  fi
+
+  printf "%s\t%s\t%s\t%s\t%s\t%s\n" "$WT_PATH" "$WT_BRANCH" "$WT_HEAD" "$CATEGORY" "$AGE_DAYS" "$SIZE" >> "$WT_TSV"
+done
+```
+
+### Step 10.2 — Decide what to offer
+
+Categorize entries from `$WT_TSV`:
+
+| Category | Meaning | Default action |
+|---|---|---|
+| `main` | The primary checkout | Never touch. |
+| `current` | The worktree this session is running in | Never touch (cannot `git worktree remove` ourselves). |
+| `merged-clean` | Clean tree, branch is ancestor of default branch | **Safe to remove.** With `auto_remove_merged_clean=true`, removed without asking. |
+| `unmerged-clean` | Clean tree but branch is NOT merged into default | Offer with explicit warning ("deleting branch loses unmerged commits"). |
+| `dirty` | Working tree has uncommitted changes | Never auto-remove; list with a warning so the user is aware. |
+| `ghost` | Registered with git but the directory was deleted manually | Offer to prune the bookkeeping (`git worktree prune` equivalent). |
+
+If the only non-skip categories are empty (no candidates) and `report_when_empty == false`, end Step 10 silently. Otherwise render the **AskUserQuestion** prompt.
+
+### Step 10.3 — Ask the user
+
+Build a multi-select question listing each candidate with its category and size, plus convenience options:
+
+> "Found {N} other git worktrees in this repo. Which (if any) should I remove?"
+>
+> Options (`multiSelect: true`):
+> - `Remove all merged-clean ({K} worktrees, {SIZE} MB)` — bundle option, shows up only when ≥1 merged-clean exists
+> - `{path}  (merged-clean, {age}d, {size})`
+> - `{path}  (unmerged-clean — branch has {N} unique commits, {age}d, {size})`
+> - `{path}  (dirty — has uncommitted changes, will NOT delete, just remind)`
+> - `{path}  (ghost — only the bookkeeping entry remains)`
+> - `Skip cleanup — keep all worktrees`
+
+For `unmerged-clean` picks, follow up with a single-select confirmation: *"Branch X has unmerged commits — really delete?"* with options `Yes, force-delete (git branch -D)` / `No, keep this one`. Skip the confirmation when `auto_remove_merged_clean=true` is set AND the entry is merged.
+
+### Step 10.4 — Execute
+
+For each user-confirmed entry:
+
+```bash
+# Clean removal (refuses if dirty; the categorization already excluded dirty).
+git -C "$MAIN_REPO" worktree remove "$WT_PATH" 2>/tmp/wtc_err \
+  && echo "  ✓ removed worktree $WT_PATH" \
+  || echo "  ⚠ git worktree remove failed: $(cat /tmp/wtc_err)" >&2
+
+# Delete the branch. -d for merged, -D when user explicitly confirmed force-delete above.
+if [ "$FORCE_BRANCH_DELETE" = "1" ]; then
+  git -C "$MAIN_REPO" branch -D "$WT_BRANCH" 2>/dev/null \
+    && echo "  ✓ force-deleted branch $WT_BRANCH" \
+    || echo "  ⚠ could not force-delete branch $WT_BRANCH" >&2
+else
+  git -C "$MAIN_REPO" branch -d "$WT_BRANCH" 2>/dev/null \
+    && echo "  ✓ deleted branch $WT_BRANCH" \
+    || echo "  ⚠ could not delete branch $WT_BRANCH (may still be reachable)" >&2
+fi
+```
+
+For `ghost` entries, run `git -C "$MAIN_REPO" worktree prune` once at the end.
+
+### Step 10.5 — Report
+
+Append to the Step 7 final summary block:
+
+```
+Worktree cleanup:
+  Removed:    <list of paths> (<total MB> freed)
+  Kept:       <list of paths with reasons — dirty / user declined>
+  Skipped:    <list of paths with reasons — current / main>
+```
+
+Failure to remove a worktree (e.g. permission error, lockfile still held) is **NOT a blocker** — log a warning and continue. The user can always finish cleanup manually with `git worktree remove --force` later.
+
+### Step 10.6 — Edge cases handled
+
+- **We are inside a worktree** that's also in the discovery list → categorized as `current`, never touched.
+- **Branch checked out in another worktree** has the `+` prefix in `git branch` output → `merge-base --is-ancestor` accepts the raw branch name (without `+`), so the prefix issue does not affect classification.
+- **Repo has only the main worktree** → if `report_when_empty=false` (default) end silently; otherwise render "No other worktrees to clean up — nothing to do.".
+- **`origin/HEAD` not set** → fall back to `main`, `master`, `trunk`, then HEAD's current branch — whichever exists first.
+- **Plan was cancelled** (Step 4) → Step 10 does not run. The user may have intentionally left worktrees alone.
 
 ---
 
