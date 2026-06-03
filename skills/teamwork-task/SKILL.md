@@ -373,6 +373,12 @@ Filtering:
 - If `config.skip_completed_tasks == true` → drop tasks whose status is `completed`.
 - Sort tasks by priority then id ascending (stable processing order).
 
+**v1.4.0 — subtasks expansion runs right after Step 3.4** (the tasklist
+context fetch). See Step 3.42 — every parent task with subtasks is replaced in
+the working set by its subtasks, so the rest of this section (comments,
+description split, attachments, …) operates on the expanded set. To recover
+v1.3 behaviour set `subtasks.enabled = false`.
+
 If the API returns HTTP 401 → token is invalid. Re-prompt the user for a new token (re-run the first-run flow in Step 2 / Step 2.6 to overwrite `.teamwork.api_token`), save, retry. If 403/404 → report to the user and stop (cannot recover automatically).
 
 ### Step 3.3 — Resolve board workflow stages
@@ -501,6 +507,211 @@ TASKLIST_DESCRIPTION=$(echo "$TL_DESC_RAW" | sed -E 's|<[^>]+>||g' | sed -E 's/[
 
 If `TASKLIST_DESCRIPTION` is non-empty, render it in Step 4 under a `## Tasklist context` heading.
 
+### Step 3.42 — Expand subtasks (v1.4.0)
+
+Teamwork's data model allows a task to have **subtasks** — child tasks under a
+parent task with their own description, acceptance criteria, comments,
+attachments, assignees, and stage on the board. A real-world example: a parent
+task `[Project bootstrap]` with 8 subtasks (`Set up CI`, `Add login`,
+`Wire up DB`, …) where the actual work lives in the subtasks and the parent is
+just a container.
+
+Up to v1.3.0 the skill never looked at subtasks. It would happily plan, commit
+and time-log against the empty parent, ignoring the 8 real units of work
+underneath. v1.4.0 closes that gap: **subtasks are first-class tasks**. After
+the initial fetch, the skill expands every parent that has subtasks and
+replaces it in the working set with its subtasks. Each subtask then goes
+through the rest of the pipeline — filter, planning, implementation, commit,
+board move, time log — exactly like a standalone task.
+
+**Decisions baked in (v1.4.0 release):**
+- **Parent stays put on the board.** The parent task is **not** moved across
+  the workflow and gets **no time log**. It is just a container — the subtasks
+  carry the actual work.
+- **Per-subtask commits and time logs.** Each subtask gets its own
+  `TYPE(scope)[<subtaskId>]: …` commit and its own `POST /tasks/{subtaskId}/time.json`
+  entry (sequential, non-overlapping, per Step 5.5 cursor).
+- **Per-subtask board moves.** Each subtask moves itself
+  *In progress → Internal testing* on its own board.
+- **Filter applies to subtasks.** When Step 3.45 (Tasklist filter) runs after
+  this step, it operates on the expanded set — a subtask in the wrong stage
+  or assigned to a teammate is dropped to `analyse_only` with the same rules
+  as a top-level task.
+
+Skip this step entirely when:
+- `config.subtasks.enabled == false` → legacy v1.3.x behaviour (parent stays in
+  the working set, subtasks invisible).
+
+```bash
+SUB_ENABLED=$(jq -r       '.subtasks.enabled // true'                "$CONFIG_FILE")
+SUB_MAX_DEPTH=$(jq -r     '.subtasks.max_depth // 2'                 "$CONFIG_FILE")
+SUB_PARENT_CTX=$(jq -r    '.subtasks.include_parent_context // true' "$CONFIG_FILE")
+
+if [ "$SUB_ENABLED" = "true" ]; then
+  # Working set after Step 3 is held in-memory by the skill. The pseudo-code
+  # below treats it as a stream of task JSON blobs and writes the expanded
+  # result to an auxiliary TSV that Step 3.45's TASK_STAGE_FILE loader can
+  # merge against.
+  #
+  # File: /tmp/tw_expanded_${ENTITY_ID}.tsv
+  #   format: <taskId>\t<parentTaskId>\t<stageName>\t<assigneesCSV>\t<name>
+  #
+  # An empty parentTaskId means "top-level task" (kept as-is). A non-empty
+  # parentTaskId means "subtask that replaced its parent in the working set".
+
+  EXPANDED_FILE="/tmp/tw_expanded_${ENTITY_ID}.tsv"
+  PARENT_CTX_FILE="/tmp/tw_parent_context_${ENTITY_ID}.tsv"
+  : > "$EXPANDED_FILE"
+  : > "$PARENT_CTX_FILE"
+
+  # Recursive expander. Bash 3.2-safe — no associative arrays, no `mapfile`.
+  expand_subtasks() {
+    local TID="$1"
+    local DEPTH="$2"
+    local PARENT_NAME="$3"
+    local PARENT_DESC="$4"
+
+    if [ "$DEPTH" -gt "$SUB_MAX_DEPTH" ]; then
+      return
+    fi
+
+    # Primary endpoint (v3). Tolerates `.tasks[]` and `.subtasks[]` shapes
+    # because v3 has shipped both at different times.
+    local SUB_JSON
+    SUB_JSON=$(curl -sS -u "$AUTH" -H "Accept: application/json" \
+      "${BASE}/projects/api/v3/tasks/${TID}/subtasks.json?pageSize=100&page=1&include=cards,stages")
+
+    local SUB_COUNT
+    SUB_COUNT=$(echo "$SUB_JSON" | jq '[(.tasks // .subtasks // [])[]] | length' 2>/dev/null || echo 0)
+
+    # Fallback when the primary endpoint shape is unexpected.
+    if [ "${SUB_COUNT:-0}" = "0" ]; then
+      SUB_JSON=$(curl -sS -u "$AUTH" -H "Accept: application/json" \
+        "${BASE}/projects/api/v3/tasks.json?parentTaskIds=${TID}&pageSize=100&page=1&include=cards,stages")
+      SUB_COUNT=$(echo "$SUB_JSON" | jq '[(.tasks // .subtasks // [])[]] | length' 2>/dev/null || echo 0)
+    fi
+
+    if [ "${SUB_COUNT:-0}" = "0" ]; then
+      return  # leaf — caller keeps the parent task in the working set
+    fi
+
+    # Cache parent context (rendered in Step 4 if SUB_PARENT_CTX=true).
+    printf "%s\t%s\t%s\n" "$TID" "$PARENT_NAME" "$PARENT_DESC" >> "$PARENT_CTX_FILE"
+
+    # Emit one TSV row per subtask. Extract stage name from .included.stages
+    # when present (same shape as Step 3.45's tasklist endpoint).
+    echo "$SUB_JSON" | jq -r --arg PID "$TID" '
+      ((.included.stages // {}) | (
+        if (type) == "object" then to_entries | map({key:.key, value:(.value.name // "")})
+        elif (type) == "array" then map({key:(.id|tostring), value:(.name // "")})
+        else [] end
+      )) as $stages
+      |
+      ((.included.cards // {}) | (
+        if (type) == "object" then to_entries | map({key:.key, value:(.value.stageId|tostring)})
+        elif (type) == "array" then map({key:(.id|tostring), value:(.stageId|tostring)})
+        else [] end
+      )) as $cards
+      |
+      (.tasks // .subtasks // [])
+      | map(
+          . as $t
+          | (($cards | map(select(.key == (($t.cardId // .card_id // "")|tostring))) | first).value // "") as $stageId
+          | (($stages | map(select(.key == $stageId)) | first).value // "") as $stageName
+          | ($t.assignees // []) as $assignees
+          | {
+              id:        ($t.id|tostring),
+              parent:    $PID,
+              stage:     $stageName,
+              assignees: ([($assignees[]?.id // empty)] | map(tostring) | join(",")),
+              name:      ($t.name // "")
+            }
+        )
+      | .[]
+      | [.id, .parent, .stage, .assignees, .name] | @tsv
+    ' >> "$EXPANDED_FILE"
+
+    # Recurse into each subtask in case of sub-subtasks.
+    while IFS=$'\t' read -r STID _; do
+      [ -z "$STID" ] && continue
+      # Pull child's name+desc for further recursion context.
+      local CHILD_JSON CHILD_NAME CHILD_DESC
+      CHILD_JSON=$(curl -sS -u "$AUTH" -H "Accept: application/json" \
+        "${BASE}/projects/api/v3/tasks/${STID}.json")
+      CHILD_NAME=$(echo "$CHILD_JSON" | jq -r '.task.name // ""')
+      CHILD_DESC=$(echo "$CHILD_JSON" | jq -r '.task.description // ""' | sed -E 's|<[^>]+>||g' | tr -d '\n' | cut -c1-300)
+      expand_subtasks "$STID" $((DEPTH + 1)) "$CHILD_NAME" "$CHILD_DESC"
+    done < <(echo "$SUB_JSON" | jq -r '(.tasks // .subtasks // [])[] | [(.id|tostring), ""] | @tsv')
+  }
+
+  # Iterate over the working set from Step 3 and expand parents that have
+  # subtasks. The caller (skill) is responsible for replacing the parent
+  # task with its subtasks in the in-memory working set when the parent's
+  # ID appears as a `parent` value in EXPANDED_FILE.
+  while IFS=$'\t' read -r TID T_NAME T_DESC; do
+    [ -z "$TID" ] && continue
+    expand_subtasks "$TID" 1 "$T_NAME" "$T_DESC"
+  done < <( # supply (taskId, name, description) for every parent in the
+            # current working set; skill emits this from its in-memory list
+            true )
+fi
+```
+
+**Working-set replacement (semantic, executed by the skill):**
+
+For each `(subtaskId, parentId, stage, assignees, name)` row in
+`EXPANDED_FILE`:
+
+1. **Remove** the row's `parentId` from the implementation working set (the
+   parent is no longer treated as work; it stays on the board untouched).
+2. **Insert** the row's `subtaskId` as a new working-set task using the same
+   fetch + parse pipeline a top-level task would go through (Step 3.5
+   comments, Step 3.6 description split, Step 3.7 attachments, Step 3.9 file
+   comments, Step 3.10 local discovery — every one of those steps reads from
+   the task's own data, so subtasks are picked up automatically once they are
+   in the working set).
+3. **Carry the stage + assignees** into Step 3.45's `TASK_STAGE_FILE` so the
+   filter has the data it needs. Concretely: when Step 3.45 builds
+   `TASK_STAGE_FILE`, merge rows from `EXPANDED_FILE` for any subtask that
+   the tasklist endpoint did not return on its own.
+4. **Cache parent context** in `PARENT_CTX_FILE`. Step 4 reads it when
+   `subtasks.include_parent_context == true` and renders a
+   `## Parent context` section for each subtask plan with the parent's name
+   plus a truncated description (≤ 300 chars).
+
+**Single-task URL on a parent with subtasks** — `URL_KIND=task` and the user
+hands us a parent ID:
+- Step 3 fetches just that one task.
+- Step 3.42 expands it: the working set becomes the 8 subtasks.
+- Step 3.45 is skipped (single-task URLs bypass the filter). Every subtask
+  becomes `process_mode=process`.
+- The user effectively gets the same behaviour as feeding the skill a tasklist
+  URL with 8 tasks in it — minus the tasklist filter.
+
+**Single-task URL on a subtask itself** — user pastes a subtask URL:
+- Step 3 fetches that subtask as the single working task.
+- Step 3.42 tries to expand it; finds no further subtasks (depth limit + leaf);
+  leaves the working set as a single task.
+- Pipeline runs as today.
+
+**Edge cases handled:**
+
+1. **`subtasks.enabled = false`** → step is a no-op; v1.3 behaviour.
+2. **`SUB_COUNT == 0`** for a task → parent has no subtasks; the parent stays
+   in the working set untouched (legacy behaviour preserved per task).
+3. **API shape variance** — both `.tasks[]` and `.subtasks[]` are accepted.
+4. **Endpoint 404** on `/tasks/{id}/subtasks.json` → fallback to
+   `/tasks.json?parentTaskIds={id}`.
+5. **Runaway recursion** — `max_depth=2` (default) caps at parent →
+   subtask → sub-subtask. Increase to 3+ for deeply nested projects.
+6. **Subtask in a different project than parent** — Teamwork allows this in
+   rare cases. Each subtask carries its own `projectId`; Step 3.3's workflow
+   resolution already caches per project, so a multi-project subtask set just
+   triggers extra workflow fetches. No special handling needed.
+7. **`skip_completed_tasks=true`** — applies per subtask: a completed subtask
+   is dropped from the expanded set the same way a completed top-level task
+   is today.
+
 ### Step 3.45 — Tasklist filter: only "To Do" + assigned to me
 
 **This step runs only when `URL_KIND=tasklist`. Single-task URLs skip it
@@ -520,6 +731,17 @@ work in the same plan.
 Skip this step entirely when **any** of these hold:
 - `URL_KIND != "tasklist"` (single-task URL) — bypass by design.
 - `config.tasklist_filter.enabled == false` or `--tasklist-filter=false`.
+
+**v1.4.0 — filter operates on the post-expansion working set.** When
+Step 3.42 replaced parent tasks with their subtasks, every subtask runs
+through the same stage + assignee rules as a standalone task. A subtask in
+the wrong column or assigned to a teammate is dropped to `analyse_only`
+exactly like a top-level task would be. Step 3.42 populates
+`/tmp/tw_expanded_${ENTITY_ID}.tsv` with per-subtask `stageName` and
+`assignees`; if the tasklist endpoint's `?include=cards,stages` response did
+not return a subtask (typical when subtasks are not on the parent tasklist's
+board view), Step 3.45 falls back to that file when building
+`TASK_STAGE_FILE` so the filter still has data to work with.
 
 ```bash
 TF_ENABLED=$(jq -r       '.tasklist_filter.enabled // true'                       "$CONFIG_FILE")
@@ -1032,6 +1254,7 @@ dropped ones if the user wants to see them via `--show-dropped`):
 ### To implement (<TF_COUNT_PROCESS>)
 
 #### 1. [#<task-id>] <title>  (est: <X> min, priority: <p>, stage: To Do, assignee: me)
+**Parent context (v1.4.0):** <omitted if not a subtask, or if subtasks.include_parent_context=false | "Project bootstrap" — Container task for initial scaffolding; subtasks split the work by area (CI / auth / DB / …)>  ← from Step 3.42 PARENT_CTX_FILE
 **Goal (final summary):** <one-line summary from description below HR>
 **Acceptance:** <bullet list condensed from description above HR>
 **Approach:** <1-3 sentences — what files / modules will likely change, what tests, what risks>

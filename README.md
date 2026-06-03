@@ -10,7 +10,20 @@ entries. Push to remote is intentionally left to the user.
 
 Part of the [`wame`](https://github.com/wamesk/claude-code) Claude Code plugin marketplace.
 
-**Current version:** 1.3.0 — see [`CHANGELOG.md`](CHANGELOG.md) for the full release history.
+**Current version:** 1.4.0 — see [`CHANGELOG.md`](CHANGELOG.md) for the full release history.
+
+---
+
+## What's new in 1.4.0
+
+- **Subtasks are first-class tasks.** When a parent task has subtasks (the common "container parent + N children" pattern — e.g. *Project bootstrap* with 8 subtasks for CI / auth / DB / …), the plugin now expands the parent in the working set and runs each subtask through the full pipeline: own description / acceptance criteria / comments / attachments fetch, own plan entry, own commit (`TYPE(scope)[<subtaskId>]: …`), own board move (*In progress → Internal testing*), own time log. The parent itself stays put on the board — it is just the container — and gets no commit and no time log.
+- **Tasklist filter applies to subtasks.** The v1.3.0 *To Do + assigned to me* rules run on the post-expansion set: a subtask in the wrong column or assigned to a teammate is dropped to *analyse-only* exactly like a top-level task. The single-task URL bypass still applies — paste the parent's URL, get all its subtasks processed regardless of column.
+- **Parent context in the plan.** Each subtask's plan entry is prefixed with a one-line `Parent context:` showing the parent's name and a short description excerpt, so you can scan what the container is meant to deliver before reading the subtask. Disable with `"subtasks": {"include_parent_context": false}`.
+- **Recursive expansion** up to `subtasks.max_depth` (default `2`) — covers parent → subtask → sub-subtask. Set to `1` to expand only direct children; raise for deeper hierarchies.
+- **API shape tolerance.** Both v3 response shapes (`.tasks[]` and `.subtasks[]`) and both endpoints (`/tasks/{id}/subtasks.json` primary, `/tasks.json?parentTaskIds={id}` fallback) are supported transparently.
+- **Backward-compatible default-off path** — set `"subtasks": {"enabled": false}` to recover v1.3 behaviour entirely (parents stay in the working set, subtasks invisible). Existing single-task and tasklist runs that did not involve subtasks behave exactly the same as in v1.3.
+
+The 1.4.0 migration is automatic and idempotent. Your existing config gains the `subtasks` block on the next run with safe defaults.
 
 ---
 
@@ -189,6 +202,9 @@ File: `~/.claude/plugins/data/teamwork-task-wamesk/config.json`
 | `tasklist_filter.only_assigned_to_me`     | `true`                                                                   | Also require the current user to be in `task.assignees`. When `false`, only the stage check applies.                                                                                   |
 | `tasklist_filter.analyze_all_tasks`       | `true`                                                                   | When `true`, tasks that fail the filter are rendered in the plan as analyse-only with a *Quick read* line. When `false`, they are dropped entirely.                                    |
 | `tasklist_filter.skip_reason_render`      | `inline`                                                                 | `inline` (default) renders the skip reason next to each analyse-only task in the plan. Other modes reserved for future variants.                                                       |
+| `subtasks.enabled`                        | `true`                                                                   | **v1.4.0** — expand every parent task with subtasks into the working set so each subtask is implemented, committed, board-moved and time-logged independently. `false` recovers v1.3 (parent stays, subtasks invisible). |
+| `subtasks.max_depth`                      | `2`                                                                      | **v1.4.0** — recursion ceiling for subtask expansion. `1` = direct children only, `2` = also sub-subtasks, `3+` = deeper hierarchies. Safety cap against runaway recursion.            |
+| `subtasks.include_parent_context`         | `true`                                                                   | **v1.4.0** — when expanding a subtask, render a `Parent context:` line (parent name + ≤ 300-char description excerpt) in the plan entry so the LLM understands the broader scope.       |
 | `worktree_handoff.enabled`                | `true`                                                                   | **v1.3.0** — master toggle for the end-of-run worktree handoff. When `false`, the skill never auto-merges or pushes from a worktree.                                                  |
 | `worktree_handoff.default_action`         | `ask`                                                                    | `ask` (default — render an AskUserQuestion), `merge`, `push`, or `leave`.                                                                                                              |
 | `worktree_handoff.default_target`         | `ask`                                                                    | `ask` (default), `parent` (the branch the worktree was created from), `main` (origin/HEAD / main / master / trunk fallback), or a literal branch name.                                 |
@@ -267,6 +283,57 @@ The motivation is the standard multi-repo Kanban setup: a single Teamwork projec
 - **Project has no workflow at all** → filter degrades to "process everything" (no `To Do` to filter by). A one-line note is shown in the plan.
 - **Task has no card / is not on the board** → falls back to `process` so backlog items never get silently stranded.
 - **`/me.json` is unreachable** (token without `users.read` scope, network blip) → assignee check is skipped so you are never silently locked out of your own work; the stage check still applies.
+
+## Subtasks (v1.4.0)
+
+Teamwork's data model allows a task to have **subtasks** — child tasks under a parent with their own description, acceptance criteria, comments, attachments, assignee, and stage on the board. A common pattern is a "container" parent task like *Project bootstrap* with 8 subtasks splitting the work by area (CI, auth, DB, …). Up to v1.3.0 the plugin ignored subtasks entirely: it planned, committed and time-logged against the empty parent, leaving the actual N units of work invisible. v1.4.0 closes that loop in **Step 3.42**.
+
+### How expansion works
+
+After the initial fetch and the tasklist-context lookup (Step 3.4), the plugin calls `GET /projects/api/v3/tasks/{id}/subtasks.json?include=cards,stages` (fallback: `GET /tasks.json?parentTaskIds={id}`) for every task in the working set. When subtasks come back, the parent is **removed from the implementation working set** and each subtask takes its place. From that point on every subtask goes through the full pipeline as if it were a top-level task:
+
+- Step 3.5 — own comments fetch (`?include=cards,stages` data carries forward).
+- Step 3.6 — own description split (acceptance criteria above HR, final summary below).
+- Step 3.7 — own attachment folder `./teamwork-task-<subtaskId>/`.
+- Step 3.9 — own file-comments digest.
+- Step 3.10 — local working-tree discovery.
+- Step 3.45 — tasklist filter (when applicable) operates on the expanded set; a subtask in the wrong column or assigned to a teammate is dropped to *analyse-only* by the same rules as a top-level task.
+- Step 4 — own plan entry, prefixed with a `Parent context:` line (parent name + ≤ 300-char description excerpt) when `subtasks.include_parent_context = true`.
+- Step 5 — own timer; the same sequential, non-overlapping 5-min cursor.
+- Step 6 — own implementation, own `TYPE(scope)[<subtaskId>]: …` commit, own *In progress → Internal testing* board move.
+- Step 5/6 timelog — own `POST /projects/api/v3/tasks/{subtaskId}/time.json` entry.
+
+### Behavioural decisions baked in
+
+- **Parent stays put.** The parent is never moved across the workflow and gets no time log — it is a container, not a work item. When all its subtasks finish, the parent is **not** auto-clicked complete; close it manually if your team uses that convention.
+- **Per-subtask commits and time logs.** No aggregation into one parent timelog. Every subtask gets its own commit with its own ID in square brackets and its own 5-min-aligned timelog.
+- **Per-subtask board moves.** Each subtask has its own card and goes through *In progress → Internal testing* independently.
+- **Filter applies to subtasks.** A subtask in the wrong column or assigned to a teammate is dropped to `analyse_only` by Step 3.45 with the same `To Do + me` rules as a standalone task.
+
+### Single-task URL on a parent with subtasks
+
+`URL_KIND=task` and the URL points at a parent: Step 3.42 expands it into its 8 (or however many) subtasks. The tasklist filter is skipped (single-task URL bypass), so every subtask is `process_mode=process` regardless of column or assignee — you effectively get the same behaviour as feeding the plugin a tasklist URL with 8 children, minus the filter.
+
+### Single-task URL on a subtask itself
+
+Paste the subtask's URL directly: Step 3.42 finds no further subtasks (leaf) and the pipeline runs against that single subtask. Useful for hand-picking one specific child to work on.
+
+### Configuration
+
+Edit `~/.claude/plugins/data/teamwork-task-wamesk/config.json`:
+
+- `subtasks.enabled = false` — recover v1.3 behaviour (parent stays in the working set, subtasks invisible). The whole rest of v1.4 is no-op.
+- `subtasks.max_depth = 1` — expand only direct children; sub-subtasks stay attached to their parent subtask.
+- `subtasks.max_depth = 3` (or higher) — go deeper for nested hierarchies.
+- `subtasks.include_parent_context = false` — drop the `Parent context:` line from subtask plan entries (saves a few tokens per task; useful when the parent name is enough).
+
+### Edge cases handled
+
+- **Subtask in a different project than parent** → the per-project workflow cache (Step 3.3) picks up the extra project; the subtask's board move targets its own project's workflow.
+- **API shape variance** → both `.tasks[]` and `.subtasks[]` response shapes are accepted; both `/tasks/{id}/subtasks.json` (primary) and `/tasks.json?parentTaskIds={id}` (fallback) are tried.
+- **`skip_completed_tasks = true`** → applies per subtask. A completed subtask is dropped from the expanded set the same way a completed top-level task is.
+- **Subtask has no card / not on the board** → falls back to `process` so backlog subtasks never get silently stranded.
+- **`subtasks.enabled = false`** → step is a complete no-op; v1.3 behaviour.
 
 ## Plan modes
 

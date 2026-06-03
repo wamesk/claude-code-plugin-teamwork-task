@@ -118,5 +118,11 @@
     "only_assigned_to_me": true,
     "analyze_all_tasks": true,
     "skip_reason_render": "inline"
+  },
+
+  "subtasks": {
+    "enabled": true,
+    "max_depth": 2,
+    "include_parent_context": true
   }
 }

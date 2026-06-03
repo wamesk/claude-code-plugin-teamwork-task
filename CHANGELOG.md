@@ -7,6 +7,104 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.4.0] - 2026-06-03
+
+**Subtasks are first-class tasks.** A common Teamwork pattern is a "container"
+parent task with N subtasks underneath — each subtask has its own
+description, acceptance criteria, comments, attachments, assignee, and board
+stage. Up to v1.3.0 the skill ignored subtasks entirely: it planned, committed
+and time-logged against the empty parent, leaving the actual N units of work
+invisible. v1.4.0 closes that loop. After the initial fetch, every parent
+task with subtasks is **expanded** in the working set — the parent steps
+aside (no board move, no commit, no time log), and each subtask runs through
+the full pipeline as if it were a standalone task.
+
+### Added
+
+- **Step 3.42 — Expand subtasks.** Runs between Step 3.4 (tasklist context)
+  and Step 3.45 (tasklist filter). For each fetched task it calls
+  `GET /projects/api/v3/tasks/{id}/subtasks.json?include=cards,stages`
+  (fallback: `GET /tasks.json?parentTaskIds={id}`) and, when subtasks are
+  returned, replaces the parent in the working set with its subtasks. Each
+  subtask carries forward through Steps 3.5 (comments), 3.6 (description
+  split), 3.7 (attachments), 3.9 (file comments), 3.10 (local discovery),
+  3.45 (tasklist filter), 4 (plan), 5 (timer), 6 (worker loop), 7 (final
+  summary) exactly like a top-level task — per-subtask attachment folder
+  (`./teamwork-task-{subtaskId}/`), per-subtask commit
+  (`TYPE(scope)[<subtaskId>]: …`), per-subtask board move
+  (*In progress → Internal testing*), per-subtask timelog
+  (`POST /tasks/{subtaskId}/time.json`) with the same sequential
+  non-overlapping 5-min cursor as today.
+- **Recursive expansion** up to `subtasks.max_depth` (default `2`) — covers
+  parent → subtask → sub-subtask. Increase for deeply nested projects;
+  decrease to `1` to expand only direct children.
+- **Parent context in the plan.** When `subtasks.include_parent_context = true`
+  (default), each subtask's plan entry gets a `Parent context:` line with
+  the parent's name plus a ≤ 300-char description excerpt so the LLM
+  understands the broader containing scope before implementing.
+- **Tasklist filter parity for subtasks.** Step 3.45 (the `To Do + me` filter)
+  now operates on the post-expansion working set. A subtask in the wrong
+  stage or assigned to a teammate is dropped to `analyse_only` with the
+  same rules as a top-level task. Step 3.42 captures per-subtask
+  `stageName` + `assignees` from the `?include=cards,stages` shape and
+  feeds them into `TASK_STAGE_FILE` when the tasklist endpoint did not
+  return the subtask on its own (the common case — subtasks are not on the
+  parent tasklist's board view).
+- **Config block `subtasks`** with three tunables:
+  - `enabled` (default `true`) — master switch. `false` recovers v1.3
+    behaviour entirely (parent stays in the working set, subtasks invisible).
+  - `max_depth` (default `2`) — recursion ceiling. `1` = direct children
+    only.
+  - `include_parent_context` (default `true`) — emit the `Parent context:`
+    line in the plan for subtasks.
+- **API shape tolerance.** Both `.tasks[]` and `.subtasks[]` response shapes
+  are accepted (Teamwork v3 has shipped both at different times). Endpoint
+  404 on `/tasks/{id}/subtasks.json` triggers fallback to
+  `/tasks.json?parentTaskIds={id}`.
+
+### Behavioural decisions baked in
+
+- **Parent stays on the board.** The parent task is not moved across the
+  workflow and gets no time log. It is a container; the work lives in the
+  subtasks.
+- **Each subtask moves itself.** Per-subtask board move
+  *In progress → Internal testing*, per-subtask `mark complete` (when
+  `auto_complete_finished_tasks = true`).
+- **Per-subtask time logs.** No aggregation into a single parent timelog —
+  every subtask gets its own entry with sequential 5-min cursoring.
+- **No auto-complete on the parent.** When all subtasks finish, the parent
+  is **not** auto-clicked complete. The user closes the container manually.
+
+### Edge cases handled
+
+- **Single-task URL on a parent with subtasks** → working set becomes the N
+  subtasks; tasklist filter is bypassed (single-task URL rule); every
+  subtask is `process`.
+- **Single-task URL on a subtask itself** → no further expansion; runs as a
+  single standalone task.
+- **Subtask in a different project than parent** → Step 3.3's per-project
+  workflow cache picks up the extra project; the subtask's board move
+  targets its own project's workflow.
+- **`skip_completed_tasks = true`** → applies per subtask, exactly like
+  top-level tasks today.
+- **Subtask has no card / not on the board** → falls back to `process` (same
+  rule as a top-level task with no card; backlog subtasks never get silently
+  stranded).
+- **`subtasks.enabled = false`** → step is a no-op; parents stay in the
+  working set; subtasks invisible (v1.3 behaviour).
+
+### Migration
+
+The 1.4.0 migration is automatic and idempotent. Your existing config gains
+the `subtasks` block on the next run with safe defaults (`enabled = true`,
+`max_depth = 2`, `include_parent_context = true`). If you do not want the
+subtask expansion in a specific run, pass `--subtasks=false` (per-run
+override) or set `"subtasks": {"enabled": false}` in your config to disable
+permanently. Existing single-task and tasklist runs that did not involve
+subtasks behave exactly the same.
+
+---
+
 ## [1.3.0] - 2026-05-29
 
 **Tasklist filter: only "To Do" + me.** A single Teamwork project commonly
