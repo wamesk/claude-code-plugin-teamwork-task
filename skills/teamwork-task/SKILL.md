@@ -1526,6 +1526,19 @@ floor_now() { echo $(( NOW_TS - (NOW_TS % ROUND_SECS) )); }
 # macOS `date -j -f`, GNU `date -d`, and a Python one-liner fallback for
 # anything weirder. Returns empty string on total failure (cursor falls back
 # to floor_now upstream).
+#
+# TIMEZONE CONTRACT (critical — do not "fix" by formatting POST times in UTC):
+#   * Teamwork RETURNS `timeLogged` in UTC (trailing `Z`). It must be parsed AS
+#     UTC into an absolute epoch — hence `date -ju` (the `-u` is mandatory; the
+#     `Z` in the BSD format string is a literal, NOT a zone directive, so
+#     without `-u` BSD `date` reads the wall-clock as LOCAL and the epoch is
+#     wrong by the local offset).
+#   * Teamwork ACCEPTS the POST/PATCH `time` field in the user's PROFILE/LOCAL
+#     timezone, not UTC. So the cursor epoch (absolute) is later formatted for
+#     the POST with LOCAL `date -r "$TS" +%H:%M:%S` (Step 6.8) — NEVER with
+#     `date -ju`/`date -u`. Parsing UTC but posting local is intentional and
+#     correct; mixing them up shifts every entry by the local offset and makes
+#     logs overlap.
 parse_iso() {
   local raw norm out
   raw="$1"
@@ -1534,8 +1547,9 @@ parse_iso() {
     | sed -E 's/\.[0-9]+(Z|[+-][0-9:]{2,5})?$/\1/' \
     | sed -E 's/[+-]00:?00$/Z/')
 
-  # macOS BSD date — UTC `Z` form
-  out=$(date -j -f "%Y-%m-%dT%H:%M:%SZ" "$norm" +%s 2>/dev/null) && \
+  # macOS BSD date — UTC `Z` form. `-u` is REQUIRED: the trailing `Z` is a
+  # literal in the format string, so without `-u` the time is read as LOCAL.
+  out=$(date -ju -f "%Y-%m-%dT%H:%M:%SZ" "$norm" +%s 2>/dev/null) && \
     { [ -n "$out" ] && echo "$out" && return 0; }
   # macOS BSD date — form with explicit zone `%z`
   out=$(date -j -f "%Y-%m-%dT%H:%M:%S%z" "$raw" +%s 2>/dev/null) && \
@@ -2220,7 +2234,14 @@ else
 BILLABLE=$(jq -r '.is_billable_by_default // true' "$CONFIG_FILE")
 INCL_HASH=$(jq -r '.include_commit_hash_in_log_description // true' "$CONFIG_FILE")
 
-# Use the session cursor — NOT wall-clock time
+# Use the session cursor — NOT wall-clock time.
+# The `time` field is interpreted by Teamwork in the user's LOCAL/profile
+# timezone (it is the inverse of `timeLogged`, which comes back in UTC). So the
+# absolute cursor epoch is formatted here with LOCAL `date -r` (no `-u`).
+# Do NOT switch this to `date -ju`/`date -u` — that would post the UTC
+# wall-clock as if it were local and shift every entry by the local offset,
+# making logs land hours early and overlap. See the TIMEZONE CONTRACT note on
+# parse_iso in Step 5.5.
 LOG_DATE=$(date -r "$SESSION_CURSOR_TS" +%Y-%m-%d 2>/dev/null || date -d "@$SESSION_CURSOR_TS" +%Y-%m-%d)
 LOG_TIME=$(date -r "$SESSION_CURSOR_TS" +%H:%M:%S 2>/dev/null || date -d "@$SESSION_CURSOR_TS" +%H:%M:%S)
 

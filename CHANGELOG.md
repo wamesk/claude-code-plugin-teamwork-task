@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.4.1] - 2026-06-10
+
+### Fixed
+
+- **Time logs no longer land hours early / overlap (timezone bug).** `parse_iso`
+  parsed the UTC `timeLogged` returned by Teamwork with macOS BSD `date -j -f
+  "…Z"` **without `-u`**, so the trailing `Z` was treated as a literal and the
+  wall-clock was read as **local** time — shifting the session cursor by the
+  local UTC offset and producing timelogs that started hours before the real
+  work and overlapped existing entries. The BSD `Z` branch now uses `date -ju`.
+- Documented the **TIMEZONE CONTRACT** on `parse_iso` (Step 5.5) and at the POST
+  `time` formatting (Step 6.8): Teamwork **returns** `timeLogged` in UTC but
+  **interprets** the POST/PATCH `time` field in the user's local/profile
+  timezone — so the cursor is parsed as UTC (`date -ju`) and the POST `time` is
+  formatted as local (`date -r`, no `-u`). The two must never be mixed.
+
+---
+
 ## [1.4.0] - 2026-06-03
 
 **Subtasks are first-class tasks.** A common Teamwork pattern is a "container"
