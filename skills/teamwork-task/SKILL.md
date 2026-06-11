@@ -1,8 +1,7 @@
 ---
 name: teamwork-task
-version: 1.3.0
 description: "Use when the user provides a Teamwork.com URL (tasklist or task) and asks to 'work on these tasks', 'urob tasky z teamworku', 'spracuj tasky z teamwork', 'vypracuj tasky z teamworku', or invokes '/teamwork-task'. Fetches tasks via the Teamwork REST API (v3), pulls task description, attachments, comments (when needed), and file comments for context, **scans the local working tree for unattached specs / samples / DNR docs that match the task keywords and asks the user whether to use them**, **detects gating phrases in the task body (e.g. 'Bez vzorky nemá zmysel písať regex') and pauses with a question before implementing instead of barreling through with synthetic data**, implements tasks one by one in the current repository, moves the task on the board (In progress → Internal testing, with fallback to Testing), commits per task using the TYPE(scope)[<task-id>]: Message convention, and logs time back to Teamwork as sequential, non-overlapping 5-min-aligned entries that pick up from your last timelog of the day. **For tasklist URLs the skill applies a board-column + assignee filter — only tasks in the column `To Do` (exact case-sensitive match) AND assigned to the current user are actually implemented; every other task in the tasklist is still fetched, analysed, and briefly commented on so the developer can sanity-check teammates' work without touching it. Single-task URLs deliberately bypass the filter.** Configurable safety gate asks for review when the diff touches UI/template files or grows beyond 100 lines. When the companion `teamwork-task-test` skill is installed, hands off to it at the very end so each task's acceptance criteria get individually verified before the user pushes. Pauses and asks the user via AskUserQuestion on blockers."
-argument-hint: "<teamwork-url> [--time-mode=real_rounded_5m|ask] [--branching=current_branch|new_feature_branch] [--plan-mode=overview|per_task|none] [--auto-commit=always|when_safe|never] [--local-discovery=true|false] [--readiness-gate=true|false] [--test-after=true|false] [--worktree-cleanup=true|false|ask] [--worktree-handoff=ask|merge|push|leave] [--worktree-target=ask|parent|main|<branch>] [--tasklist-filter=true|false] [--tasklist-todo-stage=<name>] [--tasklist-only-mine=true|false]"
+argument-hint: "<teamwork-url> [--time-mode=real_rounded_5m|ask] [--branching=current_branch|new_feature_branch] [--plan-mode=overview|per_task|none] [--auto-commit=always|when_safe|never] [--local-discovery=true|false] [--readiness-gate=true|false] [--test-after=true|false] [--worktree-cleanup=true|false|ask] [--worktree-handoff=ask|merge|push|leave] [--worktree-target=ask|parent|main|<branch>] [--tasklist-filter=true|false] [--tasklist-todo-stage=<name>] [--tasklist-only-mine=true|false] [--subtasks=true|false]"
 allowed-tools: [Bash, Read, Write, Edit, Grep, Glob, AskUserQuestion, Skill]
 ---
 
@@ -57,8 +56,12 @@ Use a simple shell regex via `Bash`:
 ```bash
 URL="<the url>"
 WORKSPACE=$(echo "$URL" | sed -nE 's|https?://([^.]+)\.teamwork\.com/.*|\1|p')
-ENTITY_ID=$(echo "$URL" | sed -nE 's|.*/(tasks|tasklists)/([0-9]+).*|\2|p')
-URL_KIND=$(echo "$URL" | sed -nE 's|.*/(tasks|tasklists)/[0-9]+.*|\1|p' | sed 's/s$//')
+# NOTE: use '#' as the s-command delimiter, NOT '|' — the regex alternation
+# (tasks|tasklists) contains a literal '|', and BSD/macOS sed treats the first
+# inner '|' as the closing delimiter, aborting with "RE error: parentheses not
+# balanced" and returning an EMPTY id/kind for every URL. '#' avoids the clash.
+ENTITY_ID=$(echo "$URL" | sed -nE 's#.*/(tasks|tasklists)/([0-9]+).*#\2#p')
+URL_KIND=$(echo "$URL" | sed -nE 's#.*/(tasks|tasklists)/[0-9]+.*#\1#p' | sed 's/s$//')
 BASE_URL="https://${WORKSPACE}.teamwork.com"
 ```
 
@@ -226,7 +229,7 @@ jq '
 chmod 600 "$CONFIG_FILE"
 ```
 
-The migration is idempotent — running it twice produces the same file. Do not print the config to stdout; only mention "config migrated to 1.3.0 schema" once if any change was made.
+The migration is idempotent — running it twice produces the same file. Do not print the config to stdout; only mention "config migrated to 1.4.2 schema" once if any change was made.
 
 The `auto_run_tests_after` key (added in 1.1.1) controls whether this skill, on a clean finish, hands off to `/teamwork-task-test` to verify the acceptance criteria of every implemented task. Default is `true`. Disable per run with `--test-after=false`.
 
@@ -542,6 +545,24 @@ Skip this step entirely when:
 - `config.subtasks.enabled == false` → legacy v1.3.x behaviour (parent stays in
   the working set, subtasks invisible).
 
+> **MANDATORY — do not skip or treat as illustrative.** The v1.4.0/v1.4.1
+> builds shipped this step's driver loop as a non-functional stub (fed by
+> `< <( true )`), so subtask expansion silently never ran and the parent
+> wrongly received the commit, board move and time log. Two things MUST happen
+> for real, on every run where a task may have subtasks:
+>
+> 1. **Materialize the working set to a file.** Before the expansion loop,
+>    write one `taskId<TAB>name<TAB>description` row per task fetched in Step 3
+>    to `WORKING_SET_FILE` — the single parent task for a `URL_KIND=task` run,
+>    or every tasklist task for a `URL_KIND=tasklist` run. The loop reads that
+>    file; an empty file means the expansion is a no-op.
+> 2. **Detect via the subtasks endpoint, never a count field.** Always call
+>    `GET /tasks/{id}/subtasks.json`. Do **not** trust a `subTasksCount` /
+>    `subtaskCount` field from the single-task fetch — Teamwork frequently
+>    returns `0` there even when subtasks exist, so relying on it skips the
+>    whole expansion. (Step 3.2's single-task fetch deliberately never reads
+>    such a field for exactly this reason.)
+
 ```bash
 SUB_ENABLED=$(jq -r       '.subtasks.enabled // true'                "$CONFIG_FILE")
 SUB_MAX_DEPTH=$(jq -r     '.subtasks.max_depth // 2'                 "$CONFIG_FILE")
@@ -584,10 +605,16 @@ if [ "$SUB_ENABLED" = "true" ]; then
     local SUB_COUNT
     SUB_COUNT=$(echo "$SUB_JSON" | jq '[(.tasks // .subtasks // [])[]] | length' 2>/dev/null || echo 0)
 
-    # Fallback when the primary endpoint shape is unexpected.
+    # Fallback when the primary endpoint returns nothing. WARNING: some Teamwork
+    # instances IGNORE the parentTaskIds query filter and return the WHOLE
+    # project, so we filter client-side to children whose parentTaskId == TID —
+    # otherwise a genuine leaf parent would absorb every task in the project as
+    # a bogus "subtask".
     if [ "${SUB_COUNT:-0}" = "0" ]; then
       SUB_JSON=$(curl -sS -u "$AUTH" -H "Accept: application/json" \
         "${BASE}/projects/api/v3/tasks.json?parentTaskIds=${TID}&pageSize=100&page=1&include=cards,stages")
+      SUB_JSON=$(echo "$SUB_JSON" | jq --argjson pid "${TID:-0}" \
+        '.tasks = [((.tasks // .subtasks // [])[] | select((.parentTaskId // 0) == $pid))]' 2>/dev/null || echo "$SUB_JSON")
       SUB_COUNT=$(echo "$SUB_JSON" | jq '[(.tasks // .subtasks // [])[]] | length' 2>/dev/null || echo 0)
     fi
 
@@ -645,19 +672,25 @@ if [ "$SUB_ENABLED" = "true" ]; then
   }
 
   # Iterate over the working set from Step 3 and expand parents that have
-  # subtasks. The caller (skill) is responsible for replacing the parent
-  # task with its subtasks in the in-memory working set when the parent's
-  # ID appears as a `parent` value in EXPANDED_FILE.
+  # subtasks. WORKING_SET_FILE MUST be written first (see the MANDATORY note
+  # above): one "taskId<TAB>name<TAB>description" row per task fetched in
+  # Step 3. This loop is fed by that file — NOT by an empty stream. If the
+  # file is missing or empty the expansion is a silent no-op and subtasks are
+  # missed (the parent then wrongly keeps the commit / board move / time log).
+  WORKING_SET_FILE="/tmp/tw_working_set_${ENTITY_ID}.tsv"
+  if [ ! -s "$WORKING_SET_FILE" ]; then
+    echo "  ⚠ Step 3.42: WORKING_SET_FILE ($WORKING_SET_FILE) is empty — write the Step 3 task list to it before expanding. Subtasks will be MISSED until you do." >&2
+  fi
+
   while IFS=$'\t' read -r TID T_NAME T_DESC; do
     [ -z "$TID" ] && continue
     expand_subtasks "$TID" 1 "$T_NAME" "$T_DESC"
-  done < <( # supply (taskId, name, description) for every parent in the
-            # current working set; skill emits this from its in-memory list
-            true )
+  done < "$WORKING_SET_FILE"
 fi
 ```
 
-**Working-set replacement (semantic, executed by the skill):**
+**Working-set replacement (perform every step below for each `EXPANDED_FILE`
+row — this is required, not illustrative):**
 
 For each `(subtaskId, parentId, stage, assignees, name)` row in
 `EXPANDED_FILE`:

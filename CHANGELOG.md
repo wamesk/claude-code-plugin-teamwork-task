@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.4.2] - 2026-06-11
+
+### Fixed
+
+- **Subtask expansion (Step 3.42) no longer silently no-ops.** The 1.4.0 / 1.4.1
+  builds shipped the expansion driver loop fed by an empty process substitution
+  (`done < <( true )`), with the working-set enumeration left to the executor as
+  a "semantic, executed by the skill" step. In practice the loop never ran:
+  `expand_subtasks` was never invoked, so a parent task's subtasks were never
+  detected and the **parent itself** received the commit, board move and time
+  log instead of its subtasks. The loop now reads a concrete `WORKING_SET_FILE`
+  that the skill must materialize first (one `taskId<TAB>name<TAB>description`
+  row per Step 3 task), guarded by an empty-file warning, and a new **MANDATORY**
+  callout makes both the working-set write and the "`GET /tasks/{id}/subtasks.json`,
+  never trust `subTasksCount`" detection rule explicit and non-optional.
+- **`parentTaskIds` fallback no longer absorbs the whole project.** Some Teamwork
+  instances ignore the `parentTaskIds` query filter and return *every* task in
+  the project; the fallback now filters client-side to children whose
+  `parentTaskId` actually equals the parent task, so a genuine leaf task can no
+  longer pick up unrelated project tasks as bogus subtasks.
+- **Step 1 URL parser no longer fails on macOS/BSD `sed`.** The `ENTITY_ID` and
+  `URL_KIND` substitutions used `|` as both the `s|||` delimiter and the regex
+  alternation operator inside `(tasks|tasklists)`; BSD `sed` (the typical macOS
+  developer platform) reads the first inner `|` as the closing delimiter and
+  aborts with `RE error: parentheses not balanced`, returning an **empty** id
+  and kind for every URL — Step 1 then cannot identify the task at all. The
+  delimiter is now `#`, which does not clash with the alternation.
+
+### Changed
+
+- **Removed the `version` field from the SKILL.md frontmatter** — `plugin.json`
+  is now the single source of truth for the version. The frontmatter value had
+  silently gone stale at `1.3.0` (two minor versions behind), the same class of
+  bug recorded back at 1.1.3; dropping the field removes the footgun entirely.
+  The runtime migration banner string was also updated from `1.3.0 schema` to
+  `1.4.2 schema` (Step 2.6).
+- Added `--subtasks=true|false` to the SKILL.md `argument-hint` — the per-run
+  toggle was documented in the CHANGELOG / README but missing from the hint.
+
+---
+
 ## [1.4.1] - 2026-06-10
 
 ### Fixed
