@@ -42,9 +42,10 @@
   "board_workflow": {
     "enabled": true,
     "in_progress_stage": "In progress",
-    "done_stage": "Internal testing",
-    "done_stage_fallbacks": ["Testing"],
-    "match_mode": "case_insensitive"
+    "done_stage": "Done - Local",
+    "done_stage_fallbacks": ["Internal testing", "Testing"],
+    "match_mode": "case_insensitive",
+    "done_stage_schema": 2
   },
 
   "time_mode": "real_rounded_5m",
@@ -113,7 +114,7 @@
 
   "tasklist_filter": {
     "enabled": true,
-    "todo_stage": "To Do",
+    "todo_stages": ["Ready for Development", "To Do"],
     "todo_stage_match_mode": "case_sensitive",
     "only_assigned_to_me": true,
     "analyze_all_tasks": true,
@@ -124,5 +125,10 @@
     "enabled": true,
     "max_depth": 2,
     "include_parent_context": true
+  },
+
+  "build_quality": {
+    "dimensions": ["ui_ux", "performance", "security", "reachability", "framework"],
+    "dimensions_schema": 2
   }
 }

@@ -1,7 +1,7 @@
 ---
 name: teamwork-task
-description: "Use when the user provides a Teamwork.com URL (tasklist or task) and asks to 'work on these tasks', 'urob tasky z teamworku', 'spracuj tasky z teamwork', 'vypracuj tasky z teamworku', or invokes '/teamwork-task'. Fetches tasks via the Teamwork REST API (v3), pulls task description, attachments, comments (when needed), and file comments for context, **scans the local working tree for unattached specs / samples / DNR docs that match the task keywords and asks the user whether to use them**, **detects gating phrases in the task body (e.g. 'Bez vzorky nemá zmysel písať regex') and pauses with a question before implementing instead of barreling through with synthetic data**, implements tasks one by one in the current repository, moves the task on the board (In progress → Internal testing, with fallback to Testing), commits per task using the TYPE(scope)[<task-id>]: Message convention, and logs time back to Teamwork as sequential, non-overlapping 5-min-aligned entries that pick up from your last timelog of the day. **For tasklist URLs the skill applies a board-column + assignee filter — only tasks in the column `To Do` (exact case-sensitive match) AND assigned to the current user are actually implemented; every other task in the tasklist is still fetched, analysed, and briefly commented on so the developer can sanity-check teammates' work without touching it. Single-task URLs deliberately bypass the filter.** Configurable safety gate asks for review when the diff touches UI/template files or grows beyond 100 lines. When the companion `teamwork-task-test` skill is installed, hands off to it at the very end so each task's acceptance criteria get individually verified before the user pushes. Pauses and asks the user via AskUserQuestion on blockers."
-argument-hint: "<teamwork-url> [--time-mode=real_rounded_5m|ask] [--branching=current_branch|new_feature_branch] [--plan-mode=overview|per_task|none] [--auto-commit=always|when_safe|never] [--local-discovery=true|false] [--readiness-gate=true|false] [--test-after=true|false] [--worktree-cleanup=true|false|ask] [--worktree-handoff=ask|merge|push|leave] [--worktree-target=ask|parent|main|<branch>] [--tasklist-filter=true|false] [--tasklist-todo-stage=<name>] [--tasklist-only-mine=true|false] [--subtasks=true|false]"
+description: "Use when the user provides a Teamwork.com URL (tasklist or task) and asks to 'work on these tasks', 'urob tasky z teamworku', 'spracuj tasky z teamwork', 'vypracuj tasky z teamworku', or invokes '/teamwork-task'. Fetches tasks via the Teamwork REST API (v3), pulls task description, attachments, comments (always the newest one, the full thread when needed), and file comments for context, **scans the local working tree for unattached specs / samples / DNR docs that match the task keywords and asks the user whether to use them**, **detects gating phrases in the task body (e.g. 'Bez vzorky nemá zmysel písať regex') and pauses with a question before implementing instead of barreling through with synthetic data**, implements tasks one by one in the current repository (planning and self-checking each one against five build-time quality dimensions — UI/UX & accessibility, performance, security, page reachability: every new screen gets its menu entry and inbound links in the same commit — and framework best practices: new or changed code uses the current idioms and built-in features of the framework / language versions the project actually has installed, detected from its lock files and looked up in current docs, never newer than installed and never as a drive-by rewrite), moves the task on the board (In progress → Done - Local, with fallbacks Internal testing → Testing), commits per task using the TYPE(scope)[<task-id>]: Message convention, and logs time back to Teamwork as sequential, non-overlapping 5-min-aligned entries that pick up from your last timelog of the day. **For tasklist URLs the skill applies a board-column + assignee filter — only tasks in one of the start columns (`Ready for Development` or `To Do` by default, exact case-sensitive match) AND assigned to the current user are actually implemented; tasks not on the board and every other task in the tasklist are still fetched, analysed, and briefly commented on so the developer can sanity-check teammates' work without touching it. Single-task URLs deliberately bypass the filter (a completed task is only processed after the user confirms).** Configurable safety gate asks for review when the diff touches UI/template files or grows beyond 100 lines. When the companion `teamwork-task-test` skill is installed, hands off to it at the very end so each task's acceptance criteria get individually verified before the user pushes. Pauses and asks the user via AskUserQuestion on blockers."
+argument-hint: "<teamwork-url> [--time-mode=real_rounded_5m|ask] [--branching=current_branch|new_feature_branch] [--plan-mode=overview|per_task|none] [--auto-commit=always|when_safe|never] [--local-discovery=true|false] [--readiness-gate=true|false] [--test-after=true|false] [--worktree-cleanup=true|false|ask] [--worktree-handoff=ask|merge|push|leave] [--worktree-target=ask|parent|main|<branch>] [--tasklist-filter=true|false] [--tasklist-todo-stage=<name>[,<name>…]] [--tasklist-only-mine=true|false] [--subtasks=true|false] [--dimensions=ui_ux,performance,security,reachability,framework|none]"
 allowed-tools: [Bash, Read, Write, Edit, Grep, Glob, AskUserQuestion, Skill]
 ---
 
@@ -15,6 +15,57 @@ progresses, commit per task, and log spent time back to Teamwork as sequential
 non-overlapping entries. The user pushes to remote manually.
 
 The user invoked this skill with: `$ARGUMENTS`
+
+---
+
+## Shell portability contract (v1.5.0)
+
+Every bash block below runs in the user's login shell through Claude Code's
+Bash tool — **zsh 5.9 on macOS**, bash elsewhere — and **every Bash tool call
+is a fresh shell**: variables and functions do not survive between calls.
+Each rule below has shipped a *silent* failure (empty comments, no subtasks,
+no board moves) before; keep them when editing this file:
+
+- **Never `echo "$VAR" | jq …`** (or `| grep` / `| sed` / `| tr`) on API JSON,
+  descriptions, comments or file lists. zsh's builtin `echo` expands `\n`,
+  `\t`, `\\` inside the payload and jq rejects it. Use `jq … <<<"$VAR"` or
+  `printf '%s\n' "$VAR" | …`.
+- **Never swallow a parse or HTTP failure** (`2>/dev/null || echo 0`). Capture
+  the status (`curl -w '\n%{http_code}'`, then `HTTP=${RESP##*$'\n'};
+  BODY=${RESP%$'\n'*}`), print a `⚠` line naming the endpoint, and state the
+  fallback the run continues with.
+- **`for X in $VAR` iterates once in zsh** (no word splitting). Use
+  `while IFS= read -r X; do …; done <<<"$VAR"`.
+- **Empty TSV fields collapse** under `IFS=$'\t' read` (tab is IFS whitespace
+  in both shells) — write `-` for an empty field and map it back, or parse the
+  file with `awk -F '\t'`.
+- **No bash-only syntax:** `[ a == b ]` (use `=`), `${!arr[@]}` / `${!name}`,
+  numeric array subscripts (zsh arrays are 1-based; `ARR[$PROJECT_ID]=1`
+  allocates a 700 000-slot array) — use slices `${ARR[@]:i:1}` or a file
+  keyed by id.
+- **Loops that GET once per task** (Step 3.42) use `curl --retry 3 -o <file>`:
+  curl then retries HTTP 429 / 5xx with backoff and honours `Retry-After`;
+  the file matters because on stdout a retried request concatenates every
+  failed body in front of the good one. Never `--retry` a POST / PUT.
+- **zsh traps:** an unmatched glob is fatal (`no matches found`) — use
+  `find … -name '…'` and quote every URL (they contain `?` and `&`); a bare
+  `local X` repeated inside a loop prints `X=<value>` — declare every `local`
+  once, at the top of the function.
+- **jq's `//` treats `false` like a missing value.** `.x // true` turns an
+  explicit `"x": false` into `true`, and `(.x //= true)` in the migration
+  rewrites it on every run. Boolean defaults use
+  `.x | if . == null then true else . end` (reads) and
+  `(.x |= if . == null then true else . end)` (migration); `// "text"`,
+  `// []` and `//= {…}` are fine.
+- **Cross-step state lives in files, never in shell variables.** Snippets
+  that read Teamwork data or run state start with the *run preamble* (Step 3)
+  that re-derives `CONFIG_FILE`, `AUTH`, `BASE`, `ENTITY_ID` and
+  `TW_JOB_DIR=/tmp/tw_job_<ENTITY_ID>`; tables shared between steps live in
+  `TW_JOB_DIR` or `/tmp/tw_*_<ENTITY_ID>.tsv`. The few scalars the worker
+  loop still carries between calls (`USER_ID`, `START_TS`,
+  `SESSION_CURSOR_TS`, `DURATION_MIN`, the Step 7 accounting lists) are
+  remembered by you, the executor, and written literally into the next
+  snippet — never assumed to survive on their own.
 
 ---
 
@@ -37,9 +88,11 @@ Optional flags (override config for this run only — not persisted):
 - `--worktree-cleanup=true|false|ask` — at end of run, scan the repo for other worktrees and offer to remove ones that are merged & clean (default `true`, see Step 10)
 - `--worktree-handoff=ask|merge|push|leave` — when running inside a worktree, decide at the end of the run what to do with the worktree's commits (default `ask`, see Step 9.5). `merge` = fast-forward into parent, fall back to merge commit if FF impossible; `push` = push current branch to remote and leave for a PR; `leave` = no-op.
 - `--worktree-target=ask|parent|main|<branch>` — when `--worktree-handoff=merge`, decide where to merge into (default `ask`).
-- `--tasklist-filter=true|false` — applies only when `URL_KIND=tasklist`: filter tasks down to the ones in the configured board column AND assigned to the current user (default `true`, see Step 3.45). Has no effect on single-task URLs.
-- `--tasklist-todo-stage=<name>` — override `tasklist_filter.todo_stage` for this run (default `To Do`, **case-sensitive**).
+- `--tasklist-filter=true|false` — applies only when `URL_KIND=tasklist`: filter tasks down to the ones in one of the configured start columns AND assigned to the current user (default `true`, see Step 3.45). Has no effect on single-task URLs.
+- `--tasklist-todo-stage=<name>[,<name>…]` — override the start columns `tasklist_filter.todo_stages` for this run; comma-separated for several (default `Ready for Development,To Do`, each matched per `tasklist_filter.todo_stage_match_mode` — **case-sensitively** by default). The Step 3.3 / 3.45 snippets take the value through their `TODO_STAGES_CLI` line.
 - `--tasklist-only-mine=true|false` — override `tasklist_filter.only_assigned_to_me` for this run (default `true`).
+- `--subtasks=true|false` — override `subtasks.enabled` for this run (default `true`, see Step 3.42).
+- `--dimensions=<csv>|none` — which build-time quality dimensions to plan (Step 6.2), follow (Step 6.3) and self-check (Step 6.5.5). Any subset of `ui_ux,performance,security,reachability,framework` (the same keys `/teamwork-task-test` reviews in its Step 6.6 — `framework` there as advisory recommendations only), or `none` to skip them (default: `config.build_quality.dimensions`, all five). Unknown keys are dropped with a `⚠` line.
 
 If `$ARGUMENTS` is empty or does not contain a URL, ask the user via **AskUserQuestion** for the Teamwork URL before doing anything else.
 
@@ -98,7 +151,7 @@ Algorithm:
    chmod 600 "$CONFIG_FILE"
    ```
 
-6. **Apply CLI flag overrides** to in-memory config (`--time-mode`, `--branching`, `--plan-mode`, `--auto-commit`) — do not persist them.
+6. **Apply CLI flag overrides** to in-memory config (`--time-mode`, `--branching`, `--plan-mode`, `--auto-commit`, `--dimensions`, …) — do not persist them. `--dimensions=none` means an empty active set; `--dimensions=ui_ux,security` keeps only the listed known keys.
 
 7. **Never echo the API token** in shell output. When invoking `curl`, pass auth via `-u` to keep it out of `ps`.
 
@@ -121,14 +174,14 @@ fi
 jq '
   (.plan_mode //= "overview") |
   (.fetch_comments_mode //= "when_needed") |
-  (.fetch_attachments //= true) |
-  (.fetch_file_comments //= true) |
+  (.fetch_attachments |= if . == null then true else . end) |
+  (.fetch_file_comments |= if . == null then true else . end) |
   (.max_attachment_size_mb //= 25) |
   (.attachments_cleanup //= "after_timelog") |
   (.auto_commit_mode //= "when_safe") |
   (.auto_commit_risky_patterns //= ["\\.(vue|jsx|tsx|svelte|blade\\.php|css|scss|sass|less|html)$"]) |
   (.auto_commit_max_diff_lines //= 100) |
-  (.auto_propose_tests //= true) |
+  (.auto_propose_tests |= if . == null then true else . end) |
   (.test_frameworks //= {
     "php_unit_preference": "auto",
     "php_browser_preference": "auto",
@@ -143,7 +196,7 @@ jq '
     "no tests", "skip tests", "without tests", "bez testov", "netreba testy"
   ]) |
   (.time_cursor_strategy //= "last_teamwork_timelog") |
-  (.include_commit_hash_in_log_description //= true) |
+  (.include_commit_hash_in_log_description |= if . == null then true else . end) |
   (.time_mode //= "real_rounded_5m") |
   (.time_rounding_minutes //= 5) |
   (.min_log_minutes //= 1) |
@@ -159,16 +212,40 @@ jq '
   (.branching_mode //= "current_branch") |
   (.default_language //= "sk") |
   (.auto_complete_finished_tasks //= false) |
-  (.skip_completed_tasks //= true) |
-  (.is_billable_by_default //= true) |
+  (.skip_completed_tasks |= if . == null then true else . end) |
+  (.is_billable_by_default |= if . == null then true else . end) |
   (.board_workflow //= {
     "enabled": true,
     "in_progress_stage": "In progress",
-    "done_stage": "Internal testing",
-    "done_stage_fallbacks": ["Testing"],
-    "match_mode": "case_insensitive"
+    "done_stage": "Done - Local",
+    "done_stage_fallbacks": ["Internal testing", "Testing"],
+    "match_mode": "case_insensitive",
+    "done_stage_schema": 2
   }) |
-  (.auto_run_tests_after //= true) |
+  # v1.5.0: the new WAME board ends in "Done - Local". The done target moves
+  # ONLY when it is still the old default "Internal testing" and the marker
+  # says this check never ran; "Internal testing" then becomes the first
+  # fallback (existing fallbacks follow, minus "Done - Local", deduplicated
+  # case-insensitively), so old boards keep landing where they did. A
+  # customised done_stage is never touched. `done_stage_schema: 2` records
+  # that the check ran, so choosing "Internal testing" again later sticks.
+  (if (.board_workflow | type) == "object"
+      and (.board_workflow.done_stage_schema // 1) < 2
+      and .board_workflow.done_stage == "Internal testing"
+   then .board_workflow.done_stage = "Done - Local"
+        | .board_workflow.done_stage_fallbacks =
+            (["Internal testing"]
+             + [ (.board_workflow.done_stage_fallbacks
+                   | if type == "array" then .[] elif type == "string" then . else empty end)
+                 | select(type == "string" and length > 0)
+                 | select(ascii_downcase as $n | $n != "done - local" and $n != "internal testing") ]
+             | reduce .[] as $s ([];
+                 if any(.[]; ascii_downcase == ($s | ascii_downcase)) then . else . + [$s] end))
+   else . end) |
+  (if (.board_workflow | type) == "object" and (.board_workflow.done_stage_schema // 1) < 2
+   then .board_workflow.done_stage_schema = 2
+   else . end) |
+  (.auto_run_tests_after |= if . == null then true else . end) |
   (.local_context_discovery //= {
     "enabled": true,
     "max_depth": 3,
@@ -209,12 +286,25 @@ jq '
   }) |
   (.tasklist_filter //= {
     "enabled": true,
-    "todo_stage": "To Do",
+    "todo_stages": ["Ready for Development", "To Do"],
     "todo_stage_match_mode": "case_sensitive",
     "only_assigned_to_me": true,
     "analyze_all_tasks": true,
     "skip_reason_render": "inline"
   }) |
+  # v1.5.0: start columns. `todo_stages` (array) supersedes the single legacy
+  # `todo_stage` string. Written once, only when absent (or null) — an
+  # existing `todo_stages` is never overwritten. A legacy value that is
+  # missing or the old default "To Do" gets the new default pair; a
+  # customised one is kept as a one-item list. The legacy key itself stays
+  # (older builds of the sibling plugins that share this file still read it).
+  (if (.tasklist_filter | type) == "object" and .tasklist_filter.todo_stages == null
+   then .tasklist_filter.todo_stages =
+          (.tasklist_filter.todo_stage as $legacy
+           | if ($legacy | type) == "string" and $legacy != "" and $legacy != "To Do"
+             then [$legacy]
+             else ["Ready for Development", "To Do"] end)
+   else . end) |
   (.worktree_handoff //= {
     "enabled": true,
     "default_action": "ask",
@@ -224,12 +314,88 @@ jq '
     "delete_worktree_after_merge": true,
     "push_remote": "origin",
     "skip_if_no_commits": true
-  })
+  }) |
+  # v1.5.0: build-time quality dimensions (Steps 6.2 / 6.3 / 6.5.5). Merged key
+  # by key so an existing block keeps its values — including an explicit `[]`
+  # ("none"), which `//=` preserves because only null/false are replaced.
+  (.build_quality //= {}) |
+  # The fifth key `framework` joins a list written before it existed ONLY when
+  # that list is exactly the old four-key default (any order). Any other list
+  # — a subset, `[]`, a list that already names `framework`, unknown keys —
+  # is a user choice and stays as it is. `dimensions_schema: 2` records that
+  # this check ran, so a user who later removes `framework` keeps that choice.
+  (if (.build_quality.dimensions_schema // 1) < 2
+      and (.build_quality.dimensions | type) == "array"
+      and (.build_quality.dimensions | sort) == ["performance", "reachability", "security", "ui_ux"]
+   then .build_quality.dimensions += ["framework"]
+   else . end) |
+  (.build_quality.dimensions //= ["ui_ux", "performance", "security", "reachability", "framework"]) |
+  (if (.build_quality.dimensions_schema // 1) < 2
+   then .build_quality.dimensions_schema = 2
+   else . end)
 ' "$CONFIG_FILE" > "$CONFIG_FILE.tmp" && mv "$CONFIG_FILE.tmp" "$CONFIG_FILE"
 chmod 600 "$CONFIG_FILE"
 ```
 
-The migration is idempotent — running it twice produces the same file. Do not print the config to stdout; only mention "config migrated to 1.4.2 schema" once if any change was made.
+The migration is idempotent — running it twice produces the same file. Do not print the config to stdout; only mention "config migrated to 1.5.0 schema" once if any change was made.
+
+The `build_quality` key (added in 1.5.0) controls the build-time quality rules —
+Step 6.2 decides per task which of the five dimensions (`ui_ux`, `performance`,
+`security`, `reachability`, `framework`) the change shape touches, Step 6.3
+follows the matching rules while implementing, and Step 6.5.5 self-checks the
+task's diff against them before the timer stops. The keys are exactly the ones
+`/teamwork-task-test` reviews at QA time (its Step 6.6), so whatever is left
+open here is handed to it in Step 8. `framework` is active here (it shapes
+the new or changed code) but **advisory** on the QA side: the tester only
+recommends, it never fails or downgrades an acceptance criterion on it.
+Default is all five; set `"build_quality": {"dimensions": []}` or pass
+`--dimensions=none` to skip them.
+
+**Migration rule for the fifth key.** `build_quality.dimensions_schema` marks
+which key set the list was last reconciled with (absent = the four-key list
+of a pre-release 1.5.0 build; `2` = five keys). The Step 2.6 migration adds
+`framework` **once**, and only when all of these hold: the marker is absent
+(or `< 2`), the list is an array, and it contains exactly `ui_ux`,
+`performance`, `security`, `reachability` — each once, in any order. Every
+other list is treated as customised and left untouched: a subset
+(`["security", "reachability"]`), an explicit `[]`, a list that already names
+`framework`, or one with unknown keys. A missing / `null` list gets the
+five-key default. Either way the marker is then set to `2`, so a user who
+removes `framework` afterwards is never overridden by a later run. A list of
+exactly the four keys is indistinguishable from the untouched old default,
+so it gains `framework` — remove it once to opt out; it stays out.
+
+**Migration rule for the board columns (1.5.0).** The shared WAME board
+(Teamwork workflow *"WAME workflow"*) starts work in *Ready for Development*
+or *To Do* and ends it in *Done - Local*; older per-project boards still end
+in *Internal testing* or *Testing*. Both keep working:
+- **Start columns** — `tasklist_filter.todo_stages` is written **once, only
+  when absent or `null`** (an existing list is never overwritten): the new
+  default `["Ready for Development", "To Do"]` when the legacy
+  `tasklist_filter.todo_stage` is missing, empty or the old default
+  `"To Do"`; `[<legacy value>]` when it was customised (`"Backlog"` →
+  `["Backlog"]`). The legacy string stays in the file and is still read when
+  `todo_stages` is absent or empty (see Step 3.3).
+- **Done target** — `board_workflow.done_stage` moves to `"Done - Local"`
+  **only** when it equals the old default `"Internal testing"` and
+  `board_workflow.done_stage_schema` is absent; the fallbacks become
+  `["Internal testing", …the existing fallbacks minus "Done - Local"…]`
+  (deduplicated case-insensitively, `"Testing"` kept). A customised
+  `done_stage` is never touched. Either way the marker is then set to `2`, so
+  a user who deliberately picks `"Internal testing"` again later keeps it.
+  Examples: the old default (`"Internal testing"` + `["Testing"]`) and a
+  config already carrying `["Done - Local", "Testing"]` as fallbacks both end
+  as `"Done - Local"` + `["Internal testing", "Testing"]`; `"QA"` stays
+  `"QA"`.
+- `board_workflow.in_progress_stage` stays `"In progress"` — the match is
+  case-insensitive, so it resolves *In Progress* on the WAME board as well.
+
+The sibling plugins that read these keys from the same shared file
+(`teamwork-task-analyze`, `teamwork-tasks-from-session`) must apply exactly
+these rules — add a missing key; move the done target only away from the old
+default and only while `done_stage_schema` is absent, then set it to `2` —
+so the file ends in the same state whichever plugin runs first, and none of
+them rewrites a value the user chose.
 
 The `auto_run_tests_after` key (added in 1.1.1) controls whether this skill, on a clean finish, hands off to `/teamwork-task-test` to verify the acceptance criteria of every implemented task. Default is `true`. Disable per run with `--test-after=false`.
 
@@ -275,17 +441,21 @@ preserved.
 
 The `tasklist_filter` key (added in 1.3.0) controls Step 3.45 — when the user
 hands a **tasklist** URL, the skill only implements tasks that are (a) currently
-in the column named by `todo_stage` (default `To Do`, matched
-**case-sensitively** by default — i.e. `to do`, `TO DO`, `ToDo` do **not**
-match) and (b) assigned to the current authenticated user. The remaining tasks
-in the tasklist are still fetched and briefly analysed in the plan (Step 4) but
-the worker loop (Step 6) skips their implementation, commit, time log, and
-board moves — so a Laravel-backend developer running the skill against a
-shared "Backend + Ionic frontend" tasklist sees teammates' tasks for context
-and can comment on them, but does not start coding them. Single-task URLs
-(`URL_KIND=task`) **always** bypass the filter, no matter the config — when a
-user opens a specific task by ID they typically want it processed regardless
-of where it sits on the board. Disable entirely with
+in **one of the start columns** listed in `todo_stages` (default
+`["Ready for Development", "To Do"]` since 1.5.0; the list order is only the
+display order; each name matched **case-sensitively** by default — i.e.
+`to do`, `TO DO`, `ToDo` do **not** match `To Do`) and (b) assigned to the
+current authenticated user. A task that is **not on the board** (or whose
+project has no workflow) has no start column and is analyse-only as well
+(1.5.0). The remaining tasks in the tasklist are still fetched and briefly
+analysed in the plan (Step 4) but the worker loop (Step 6) skips their
+implementation, commit, time log, and board moves — so a Laravel-backend
+developer running the skill against a shared "Backend + Ionic frontend"
+tasklist sees teammates' tasks for context and can comment on them, but does
+not start coding them. Single-task URLs (`URL_KIND=task`) bypass the filter,
+no matter the config — when a user opens a specific task by ID they
+typically want it processed regardless of where it sits on the board; only a
+**completed** task asks first (Step 3.35). Disable entirely with
 `"tasklist_filter": {"enabled": false}` or per run with
 `--tasklist-filter=false`.
 
@@ -316,16 +486,27 @@ chains into Step 10 cleanup without re-asking. Disable per run with
 
 Step 3.45 (tasklist filter) and Step 5.5 (time cursor) both need the
 authenticated user's numeric ID. Teamwork's v3 API does not expose a `/me`
-endpoint, so fetch it once from the legacy v1 `/me.json` and cache it:
+endpoint, so fetch it once from the legacy v1 `/me.json`:
 
 ```bash
+CONFIG_FILE="$HOME/.claude/plugins/data/teamwork-task-wamesk/config.json"
+AUTH="$(jq -r '.teamwork.api_token' "$CONFIG_FILE"):xxx"
+BASE=$(jq -r '.teamwork.base_url' "$CONFIG_FILE")
+
 USER_ID=$(curl -sS -u "$AUTH" -H "Accept: application/json" \
   "${BASE}/me.json" | jq -r '.person.id // empty')
 
 if [ -z "$USER_ID" ]; then
   echo "  ⚠ could not resolve the current Teamwork user — assignee filter (Step 3.45) and last-timelog cursor (Step 5.5) will fall back to safe defaults." >&2
+else
+  echo "  ℹ current Teamwork user id: ${USER_ID}" >&2
 fi
 ```
+
+"Cached" means *remembered by you, the executor*: a shell variable does not
+survive into the next Bash call (see the shell portability contract), so carry
+the printed id literally into the `USER_ID="…"` line of the Step 3.45 and
+Step 5.5 snippets.
 
 Treat the empty case as **non-fatal**:
 - Step 3.45 falls back to "stage filter only" (skip the assignee check) so the
@@ -342,38 +523,155 @@ the token entirely out of stdout/stderr.
 
 Authentication: HTTP Basic, username = API token, password = any string (Teamwork convention: use `xxx`).
 
+**Run preamble.** Every Bash call is a fresh shell, so every snippet from here
+on starts with these lines (substitute the Step 1 values literally):
+
 ```bash
+CONFIG_FILE="$HOME/.claude/plugins/data/teamwork-task-wamesk/config.json"
 TOKEN=$(jq -r '.teamwork.api_token' "$CONFIG_FILE")
 BASE=$(jq -r '.teamwork.base_url' "$CONFIG_FILE")
 AUTH="${TOKEN}:xxx"
+ENTITY_ID="<ENTITY_ID from Step 1>"
+URL_KIND="<URL_KIND from Step 1>"
+TW_JOB_DIR="/tmp/tw_job_${ENTITY_ID}"   # per-run state shared between steps
 ```
 
 Endpoints (Teamwork API v3 — see `https://apidocs.teamwork.com/docs/teamwork/v3/`):
+- **Single task** (`URL_KIND=task`) — `GET /projects/api/v3/tasks/{id}.json` → `.task`.
+- **Tasklist** (`URL_KIND=tasklist`) — `GET /projects/api/v3/tasklists/{id}.json`
+  → `.tasklist` (name, description; a *completed* tasklist answers 404) and
+  `GET /projects/api/v3/tasklists/{id}/tasks.json?pageSize=100&page=N` →
+  `.tasks[]`, paginated while `.meta.page.hasMore == true`.
 
-**Single task** (when `URL_KIND=task`):
+The fetch resets `TW_JOB_DIR` and the per-entity tables of Steps 3.42 / 3.45
+that live next to it in `/tmp` (so a previous run of the same URL cannot leak
+stale state into this one — e.g. an old `analyse_only` verdict surviving a
+`--tasklist-filter=false` re-run, or old subtasks surviving `--subtasks=false`)
+and writes three files the later steps read:
+
+| File | Shape | Read by |
+| --- | --- | --- |
+| `$TW_JOB_DIR/tasks.json` | `{tasklist: {…} or null, tasks: [v3 task objects]}` | 3.4, 3.45, 3.10 |
+| `/tmp/tw_working_set_${ENTITY_ID}.tsv` | `taskId<TAB>name<TAB>description` (plain text, ≤ 300 chars, `-` when empty) | 3.42 |
+| `$TW_JOB_DIR/task_projects.tsv` | `taskId<TAB>projectId` (Step 3.42 appends subtasks) | 3.3, 6.1.5, 6.8.5 |
+
 ```bash
-curl -sS -u "$AUTH" -H "Accept: application/json" \
-  "${BASE}/projects/api/v3/tasks/${ENTITY_ID}.json"
+# (run preamble)
+SKIP_DONE=$(jq -r '.skip_completed_tasks | if . == null then true else . end' "$CONFIG_FILE")
+rm -rf "$TW_JOB_DIR" && mkdir -p "$TW_JOB_DIR"
+# Per-entity tables outside TW_JOB_DIR (Steps 3.42 / 3.45 / 6.0a read them).
+# Explicit names, no glob — an unmatched glob is fatal in zsh.
+rm -f "/tmp/tw_expanded_${ENTITY_ID}.tsv" "/tmp/tw_parent_context_${ENTITY_ID}.tsv" \
+      "/tmp/tw_task_stages_${ENTITY_ID}.tsv" "/tmp/tw_tasks_process_${ENTITY_ID}.tsv"
+TASKS_FILE="$TW_JOB_DIR/tasks.json"
+WORKING_SET_FILE="/tmp/tw_working_set_${ENTITY_ID}.tsv"
+TASK_PROJECT_FILE="$TW_JOB_DIR/task_projects.tsv"
+: > "$WORKING_SET_FILE"; : > "$TASK_PROJECT_FILE"
+
+if [ "$URL_KIND" = "task" ]; then
+  RESP=$(curl -sS -u "$AUTH" -H "Accept: application/json" -w '\n%{http_code}' \
+    "${BASE}/projects/api/v3/tasks/${ENTITY_ID}.json")
+  HTTP=${RESP##*$'\n'}; BODY=${RESP%$'\n'*}
+  if [ "$HTTP" = "200" ]; then
+    # A single-task URL keeps a completed task here — skip_completed_tasks
+    # only filters tasklist / subtask iteration. Step 3.35 asks the user
+    # whether to process it (default: skip).
+    jq '{tasklist: null, tasks: [.task]}' <<<"$BODY" > "$TASKS_FILE" \
+      || { echo "  ⚠ GET /projects/api/v3/tasks/${ENTITY_ID}.json returned unparsable JSON — nothing to work on" >&2; rm -f "$TASKS_FILE"; }
+  else
+    echo "  ⚠ GET /projects/api/v3/tasks/${ENTITY_ID}.json → HTTP ${HTTP}: $(jq -r '.errors[0].detail // .message // empty' <<<"$BODY" 2>/dev/null)" >&2
+  fi
+else
+  TL_JSON=null
+  RESP=$(curl -sS -u "$AUTH" -H "Accept: application/json" -w '\n%{http_code}' \
+    "${BASE}/projects/api/v3/tasklists/${ENTITY_ID}.json")
+  HTTP=${RESP##*$'\n'}; BODY=${RESP%$'\n'*}
+  if [ "$HTTP" != "200" ] || ! TL_JSON=$(jq -c '.tasklist // null' <<<"$BODY"); then
+    TL_JSON=null
+    echo "  ⚠ GET /projects/api/v3/tasklists/${ENTITY_ID}.json → HTTP ${HTTP} — continuing without the tasklist name/description (a completed tasklist answers 404)" >&2
+  fi
+
+  PAGES_FILE="$TW_JOB_DIR/tasks.pages.jsonl"; : > "$PAGES_FILE"
+  PAGE=1
+  while :; do
+    RESP=$(curl -sS -u "$AUTH" -H "Accept: application/json" -w '\n%{http_code}' \
+      "${BASE}/projects/api/v3/tasklists/${ENTITY_ID}/tasks.json?pageSize=100&page=${PAGE}")
+    HTTP=${RESP##*$'\n'}; BODY=${RESP%$'\n'*}
+    if [ "$HTTP" != "200" ]; then
+      echo "  ⚠ GET /projects/api/v3/tasklists/${ENTITY_ID}/tasks.json?page=${PAGE} → HTTP ${HTTP}: $(jq -r '.errors[0].detail // .message // empty' <<<"$BODY" 2>/dev/null) — the working set stops at the tasks fetched so far" >&2
+      break
+    fi
+    if ! jq -c '.tasks[]?' <<<"$BODY" >> "$PAGES_FILE"; then
+      echo "  ⚠ tasklist page ${PAGE} is not valid JSON — the working set stops at the tasks fetched so far" >&2
+      break
+    fi
+    [ "$(jq -r '.meta.page.hasMore // false' <<<"$BODY")" = "true" ] || break
+    PAGE=$((PAGE + 1))
+  done
+
+  jq -s --argjson tl "$TL_JSON" --arg skip "$SKIP_DONE" \
+    '{tasklist: $tl, tasks: [.[] | select($skip != "true" or .status != "completed")]}' \
+    "$PAGES_FILE" > "$TASKS_FILE"
+fi
+
+if [ -s "$TASKS_FILE" ]; then
+  # Working set for Step 3.42 — plain-text description, empty fields as "-"
+  # (an empty TSV field would collapse under `IFS=$'\t' read`).
+  jq -r '.tasks[] | [
+      (.id | tostring),
+      ((.name // "") | if . == "" then "-" else . end),
+      ((.description // "") | gsub("<[^>]+>"; "") | gsub("\\s+"; " ") | .[0:300]
+        | if . == "" then "-" else . end)
+    ] | @tsv' "$TASKS_FILE" > "$WORKING_SET_FILE"
+
+  # v3 task objects carry NO `projectId` — it lives in `.tasklist.meta.projectId`.
+  jq -r '.tasks[] | [(.id | tostring), ((.projectId // .tasklist.meta.projectId // "") | tostring)] | @tsv' \
+    "$TASKS_FILE" > "$TASK_PROJECT_FILE"
+
+  # v1 fallback for any task whose project id is still unknown.
+  MISSING=$(awk -F '\t' '$2 == "" { print $1 }' "$TASK_PROJECT_FILE")
+  if [ -n "$MISSING" ]; then
+    while IFS= read -r TID; do
+      PID=$(curl -sS -u "$AUTH" -H "Accept: application/json" "${BASE}/tasks/${TID}.json" \
+        | jq -r '."todo-item"."project-id" // empty')
+      if [ -n "$PID" ]; then
+        awk -F '\t' -v OFS='\t' -v id="$TID" -v pid="$PID" '$1 == id { $2 = pid } { print }' \
+          "$TASK_PROJECT_FILE" > "$TASK_PROJECT_FILE.tmp" && mv "$TASK_PROJECT_FILE.tmp" "$TASK_PROJECT_FILE"
+      else
+        echo "  ⚠ task #${TID}: project id unknown in v3 and v1 — board moves for this task will be skipped" >&2
+      fi
+    done <<<"$MISSING"
+  fi
+  echo "  ℹ Step 3: $(grep -c . "$WORKING_SET_FILE") task(s) in the working set" >&2
+else
+  echo "  ⚠ Step 3: no task data fetched — report the HTTP line above to the user and stop" >&2
+fi
 ```
 
-**Tasklist** (when `URL_KIND=tasklist`):
-```bash
-# Tasklist metadata (description lives here too — captured in Step 3.4)
-curl -sS -u "$AUTH" -H "Accept: application/json" \
-  "${BASE}/projects/api/v3/tasklists/${ENTITY_ID}.json"
-
-# Tasks in the tasklist (paginated; loop pages if .meta.page.hasMore == true)
-curl -sS -u "$AUTH" -H "Accept: application/json" \
-  "${BASE}/projects/api/v3/tasklists/${ENTITY_ID}/tasks.json?pageSize=100&page=1"
-```
-
-For each task, extract via `jq`:
-- `.task.id` (single response) or `.tasks[] | {id, name, description, projectId, estimateMinutes, priority, status, dueAt, commentsCount}` (list response). Field names follow v3 schema; if the response uses different keys (legacy v1 lived at `/tasks.json` with snake_case), inspect with `jq 'keys'` and adapt.
-- **`projectId`** is required for board workflow resolution (Step 3.3).
-- **`commentsCount`** is used by the `when_needed` comments heuristic (Step 3.5).
+Fields used later (v3 names, verified against the live API):
+- `id`, `name`, `description` (HTML), `status`, `priority`, `estimateMinutes`,
+  `parentTaskId`, `tasklistId`.
+- **Project id = `.projectId // .tasklist.meta.projectId`.** v3 task objects —
+  the single fetch *and* the list items — carry **no `projectId` key**; the id
+  sits in `.tasklist = {id, type, meta: {name, projectId}}`. Reading
+  `.projectId` alone yields `null`, which silently disabled workflow detection
+  (Step 3.3), the start-column lookup (Step 3.45) and every board move
+  (Steps 6.1.5 / 6.8.5). v1 fallback: `GET /tasks/{id}.json` →
+  `."todo-item"."project-id"`.
+- **There is no `commentsCount` either** — v3 never returns it, so a gate
+  on it never opens. Step 3.5 counts comments with a one-item probe instead.
+- `workflowStages[] = {workflowId, stageId, stageTaskDisplayOrder}` — the
+  task's board column (`stageId: 0` = not on the board). Step 3.45 reads the
+  column from here; `?include=cards,stages` returns an empty `.included` on
+  the task endpoints.
+- `assigneeUserIds` (may be `null`) / `assignees[] = {id, type}` — Step 3.45.
+- `attachments[] = {id, type: "files"}` — references only; Step 3.7 resolves them.
 
 Filtering:
-- If `config.skip_completed_tasks == true` → drop tasks whose status is `completed`.
+- If `config.skip_completed_tasks == true` → completed tasks are dropped
+  silently from **tasklist** and **subtask** (Step 3.42) iteration. A
+  single-task URL pointing at a completed task is kept in the working set and
+  Step 3.35 **asks** whether to process it (default: skip).
 - Sort tasks by priority then id ascending (stable processing order).
 
 **v1.4.0 — subtasks expansion runs right after Step 3.4** (the tasklist
@@ -386,126 +684,248 @@ If the API returns HTTP 401 → token is invalid. Re-prompt the user for a new t
 
 ### Step 3.3 — Resolve board workflow stages
 
-If `config.board_workflow.enabled == true`, fetch the workflow + stages for each unique `projectId` in the task list (one call per project, cache results):
+Fetch the workflow + stages once per unique project id in
+`$TW_JOB_DIR/task_projects.tsv` (Step 3). The stages are needed twice: for the
+board moves (only when `config.board_workflow.enabled == true`) and for the
+Step 3.45 start-column filter (always), so the fetch itself is not gated.
 
-Bash 4+ associative arrays are not available on macOS's default `/bin/bash` 3.2, so this skill performs name→id lookup via a temp lookup function over a `name<TAB>id` text table. The table is built once per project from the API response and reused for both the start and done stage resolution.
+Stage name → id lookup goes through a `name<TAB>id` text table (associative
+arrays behave differently in bash 3.2, bash 4+ and zsh). The per-project
+result is written to `$TW_JOB_DIR/board_<projectId>.tsv` (`key<TAB>value`
+rows), because Steps 3.45, 6.1.5 and 6.8.5 run in later Bash calls where no
+variable survives. Every stage of every project also lands in
+`$TW_JOB_DIR/stage_names.tsv` (`stageId<TAB>name`) for Steps 3.42 / 3.45.
 
 ```bash
-IN_PROGRESS_NAME=$(jq -r '.board_workflow.in_progress_stage' "$CONFIG_FILE")
-DONE_NAME=$(jq -r       '.board_workflow.done_stage'         "$CONFIG_FILE")
+# (run preamble — see Step 3)
+TASK_PROJECT_FILE="$TW_JOB_DIR/task_projects.tsv"
+STAGE_NAMES_FILE="$TW_JOB_DIR/stage_names.tsv"
+touch "$STAGE_NAMES_FILE"
 
-# Build FALLBACKS array (bash 3.2-safe: no `mapfile`)
+BW_ENABLED=$(jq -r '.board_workflow.enabled | if . == null then true else . end' "$CONFIG_FILE")
+IN_PROGRESS_NAME=$(jq -r '.board_workflow.in_progress_stage // "In progress"' "$CONFIG_FILE")
+DONE_NAME=$(jq -r       '.board_workflow.done_stage // "Done - Local"'        "$CONFIG_FILE")
+TODO_MATCH_MODE=$(jq -r '.tasklist_filter.todo_stage_match_mode // "case_sensitive"' "$CONFIG_FILE")
+
+# v1.5.0 start columns, one name per line: `todo_stages` (array) → legacy
+# `todo_stage` (string) → default pair. An empty list counts as absent.
+# Keep this jq identical in Step 3.45.
+TODO_STAGES_CLI=""   # --tasklist-todo-stage for this run (comma-separated); empty = config
+TODO_NAMES=$(jq -r '
+  (.tasklist_filter.todo_stages
+     | if type == "array" then map(select(type == "string" and length > 0))
+       elif type == "string" and length > 0 then [.] else [] end
+     | if length > 0 then . else null end)
+  // (.tasklist_filter.todo_stage | if type == "string" and length > 0 then [.] else null end)
+  // ["Ready for Development", "To Do"]
+  | .[]' "$CONFIG_FILE")
+if [ -n "$TODO_STAGES_CLI" ]; then
+  TODO_NAMES=$(printf '%s\n' "$TODO_STAGES_CLI" | tr ',' '\n' \
+    | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | grep -v '^$')
+fi
+
+# Build FALLBACKS array (bash 3.2-safe: no `mapfile`). Default since 1.5.0:
+# "Internal testing", then "Testing" — the done columns of the older boards.
 FALLBACKS=()
 while IFS= read -r FB; do
   [ -n "$FB" ] && FALLBACKS+=("$FB")
-done < <(jq -r '.board_workflow.done_stage_fallbacks[]?' "$CONFIG_FILE")
+done < <(jq -r '(.board_workflow.done_stage_fallbacks // ["Internal testing", "Testing"])
+                | if type == "array" then .[] else . end' "$CONFIG_FILE")
 
-# Per project (cache by $PROJECT_ID):
-WF_RESP=$(curl -sS -u "$AUTH" -H "Accept: application/json" \
-  "${BASE}/projects/api/v3/workflows.json?projectIds=${PROJECT_ID}&include=stages")
-
-WORKFLOW_ID=$(echo "$WF_RESP" | jq -r '.workflows[0].id // empty')
-
-# Build per-project stage lookup file: lowercase_name<TAB>id
-# Teamwork v3 returns `.included.stages` as an OBJECT keyed by string ID; the
-# stage's own `.value.id` may or may not duplicate the key, so we prefer `.key`
-# as the canonical ID. We also tolerate an array shape just in case.
-STAGE_TABLE_FILE="/tmp/tw_stages_${PROJECT_ID}.tsv"
-echo "$WF_RESP" | jq -r '
-  if (.included.stages | type) == "object" then
-    .included.stages | to_entries[] | [(.value.name // ""), (.key // (.value.id|tostring))]
-  elif (.included.stages | type) == "array" then
-    .included.stages[]                  | [(.name // ""), (.id|tostring)]
-  else empty end
-  | "\(.[0] | ascii_downcase)\t\(.[1])"
-' > "$STAGE_TABLE_FILE"
-
-# Lookup helper (bash 3.2 compatible)
-lookup_stage_id() {
-  local needle
-  needle=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+# Lookup helpers — defined and used inside this one snippet. The
+# case-insensitive one lowers ASCII only (LC_ALL=C), exactly like jq's
+# ascii_downcase that built the table, so a name with an uppercase non-ASCII
+# letter ("Čaká …") still finds itself.
+lookup_stage_id() {                 # case-insensitive
+  local needle=""
+  needle=$(printf '%s' "$1" | LC_ALL=C tr '[:upper:]' '[:lower:]')
   awk -F '\t' -v n="$needle" '$1 == n { print $2; exit }' "$STAGE_TABLE_FILE"
 }
-
-# Resolve target stages (case-insensitive via lookup_stage_id)
-IN_PROGRESS_STAGE_ID=$(lookup_stage_id "$IN_PROGRESS_NAME")
-
-DONE_STAGE_ID=$(lookup_stage_id "$DONE_NAME")
-DONE_RESOLVED_NAME=""
-if [ -n "$DONE_STAGE_ID" ]; then
-  DONE_RESOLVED_NAME="$DONE_NAME"
-else
-  for FB in "${FALLBACKS[@]}"; do
-    CANDIDATE=$(lookup_stage_id "$FB")
-    if [ -n "$CANDIDATE" ]; then
-      DONE_STAGE_ID="$CANDIDATE"
-      DONE_RESOLVED_NAME="$FB"
-      break
-    fi
-  done
-fi
-
-# --- v1.3.0: tasklist filter "To Do" stage lookup ---------------------------
-# Build a *case-sensitive* lookup table alongside the case-insensitive one above.
-# Step 3.45 needs to resolve the column "To Do" (or whatever the user configured)
-# using strict casing — `to do`, `TO DO`, `ToDo` must NOT match the user's
-# explicit "To Do" preference. We keep a second TSV with the raw name so the
-# case-sensitive lookup is a single awk pass without re-fetching workflows.
-STAGE_TABLE_CS_FILE="/tmp/tw_stages_cs_${PROJECT_ID}.tsv"
-echo "$WF_RESP" | jq -r '
-  if (.included.stages | type) == "object" then
-    .included.stages | to_entries[] | [(.value.name // ""), (.key // (.value.id|tostring))]
-  elif (.included.stages | type) == "array" then
-    .included.stages[]                  | [(.name // ""), (.id|tostring)]
-  else empty end
-  | "\(.[0])\t\(.[1])"
-' > "$STAGE_TABLE_CS_FILE"
-
-# Case-sensitive lookup helper (used by Step 3.45 only).
-lookup_stage_id_cs() {
+lookup_stage_id_cs() {              # case-sensitive (Step 3.45 start columns)
   awk -F '\t' -v n="$1" '$1 == n { print $2; exit }' "$STAGE_TABLE_CS_FILE"
 }
 
-# Resolve the "To Do" stage ID per project. Honour the configured match mode —
-# `case_sensitive` (default) uses the strict CS lookup; `case_insensitive`
-# delegates to the existing lookup_stage_id helper.
-TODO_NAME=$(jq -r '.tasklist_filter.todo_stage // "To Do"' "$CONFIG_FILE")
-TODO_MATCH_MODE=$(jq -r '.tasklist_filter.todo_stage_match_mode // "case_sensitive"' "$CONFIG_FILE")
+while IFS= read -r PROJECT_ID; do
+  [ -z "$PROJECT_ID" ] && continue
+  BOARD_FILE="$TW_JOB_DIR/board_${PROJECT_ID}.tsv"
+  # Already resolved in this run — a re-run after Step 3.42 only fetches
+  # projects that subtasks added.
+  [ -s "$BOARD_FILE" ] && continue
 
-if [ "$TODO_MATCH_MODE" = "case_insensitive" ]; then
-  TODO_STAGE_ID=$(lookup_stage_id "$TODO_NAME")
-else
-  TODO_STAGE_ID=$(lookup_stage_id_cs "$TODO_NAME")
-fi
+  WORKFLOW_ID=""; IN_PROGRESS_STAGE_ID=""; DONE_STAGE_ID=""; DONE_RESOLVED_NAME=""
+  TODO_STAGE_IDS=""; TODO_SUMMARY=""
+  STAGE_TABLE_FILE="/tmp/tw_stages_${PROJECT_ID}.tsv"        # lowercase_name<TAB>id
+  STAGE_TABLE_CS_FILE="/tmp/tw_stages_cs_${PROJECT_ID}.tsv"  # raw_name<TAB>id
 
-if [ -z "$TODO_STAGE_ID" ]; then
-  # Not having a "To Do" column is normal on freeform Kanban boards. The
-  # tasklist filter (Step 3.45) reports this in the plan rather than blocking
-  # the run — the user can still pass `--tasklist-filter=false` to process
-  # everything anyway.
-  TODO_STAGE_MISSING_FOR_PROJECT[$PROJECT_ID]=1
+  RESP=$(curl -sS -u "$AUTH" -H "Accept: application/json" -w '\n%{http_code}' \
+    "${BASE}/projects/api/v3/workflows.json?projectIds=${PROJECT_ID}&include=stages")
+  HTTP=${RESP##*$'\n'}; WF_RESP=${RESP%$'\n'*}
+  if [ "$HTTP" != "200" ]; then
+    echo "  ⚠ GET /projects/api/v3/workflows.json?projectIds=${PROJECT_ID} → HTTP ${HTTP}: $(jq -r '.errors[0].detail // .message // empty' <<<"$WF_RESP" 2>/dev/null) — board moves and the start-column lookup are disabled for project #${PROJECT_ID}" >&2
+    WF_RESP='{}'
+  fi
+
+  if ! WORKFLOW_ID=$(jq -r '.workflows[0].id // empty' <<<"$WF_RESP"); then
+    echo "  ⚠ workflows.json for project #${PROJECT_ID} is not valid JSON — board moves disabled for it" >&2
+    WF_RESP='{}'; WORKFLOW_ID=""
+  fi
+
+  # Teamwork v3 returns `.included.stages` as an OBJECT keyed by string ID; the
+  # stage's own `.value.id` may or may not duplicate the key, so we prefer
+  # `.key` as the canonical ID. An array shape is tolerated just in case.
+  STAGES_JQ='
+    if (.included.stages | type) == "object" then
+      .included.stages | to_entries[] | [(.value.name // ""), (.key // (.value.id|tostring))]
+    elif (.included.stages | type) == "array" then
+      .included.stages[]                  | [(.name // ""), (.id|tostring)]
+    else empty end'
+  jq -r "$STAGES_JQ"' | "\(.[0] | ascii_downcase)\t\(.[1])"' <<<"$WF_RESP" > "$STAGE_TABLE_FILE"
+  jq -r "$STAGES_JQ"' | "\(.[0])\t\(.[1])"'                  <<<"$WF_RESP" > "$STAGE_TABLE_CS_FILE"
+  jq -r "$STAGES_JQ"' | "\(.[1])\t\(.[0])"'                  <<<"$WF_RESP" >> "$STAGE_NAMES_FILE"
+
+  # Resolve target stages (case-insensitive — "In progress" also resolves the
+  # WAME board's "In Progress"; "Done - Local" falls back to "Internal
+  # testing" / "Testing" on the older boards).
+  IN_PROGRESS_STAGE_ID=$(lookup_stage_id "$IN_PROGRESS_NAME")
+  DONE_STAGE_ID=$(lookup_stage_id "$DONE_NAME")
+  if [ -n "$DONE_STAGE_ID" ]; then
+    DONE_RESOLVED_NAME="$DONE_NAME"
+  else
+    for FB in "${FALLBACKS[@]}"; do
+      CANDIDATE=$(lookup_stage_id "$FB")
+      if [ -n "$CANDIDATE" ]; then
+        DONE_STAGE_ID="$CANDIDATE"
+        DONE_RESOLVED_NAME="$FB"
+        break
+      fi
+    done
+  fi
+
+  # --- v1.5.0: tasklist filter start columns ---------------------------------
+  # Every configured start column is looked up per board. `case_sensitive`
+  # (default) uses the strict lookup — `to do`, `TO DO`, `ToDo` must NOT match
+  # an explicit "To Do"; `case_insensitive` delegates to lookup_stage_id. A
+  # board that lacks some start columns is normal (the older per-project
+  # boards have no "Ready for Development") — the ids are informational, Step
+  # 3.45 matches by name and reports a board with none of them in the plan.
+  while IFS= read -r TS; do
+    [ -z "$TS" ] && continue
+    if [ "$TODO_MATCH_MODE" = "case_insensitive" ]; then
+      SID=$(lookup_stage_id "$TS")
+    else
+      SID=$(lookup_stage_id_cs "$TS")
+    fi
+    [ -n "$SID" ] && TODO_STAGE_IDS="${TODO_STAGE_IDS:+${TODO_STAGE_IDS},}${SID}"
+    TODO_SUMMARY="${TODO_SUMMARY:+${TODO_SUMMARY}, }${TS}=${SID:-—}"
+  done <<<"$TODO_NAMES"
+
+  DISABLED=0
+  if [ "$BW_ENABLED" != "true" ] || [ -z "$WORKFLOW_ID" ] \
+     || { [ -z "$IN_PROGRESS_STAGE_ID" ] && [ -z "$DONE_STAGE_ID" ]; }; then
+    DISABLED=1
+  fi
+
+  {
+    printf 'workflow_id\t%s\n'          "$WORKFLOW_ID"
+    printf 'in_progress_stage_id\t%s\n' "$IN_PROGRESS_STAGE_ID"
+    printf 'done_stage_id\t%s\n'        "$DONE_STAGE_ID"
+    printf 'done_resolved_name\t%s\n'   "$DONE_RESOLVED_NAME"
+    printf 'todo_stage_ids\t%s\n'       "$TODO_STAGE_IDS"
+    printf 'disabled\t%s\n'             "$DISABLED"
+  } > "$BOARD_FILE"
+
+  echo "  ℹ project #${PROJECT_ID}: workflow ${WORKFLOW_ID:-none}, in progress=${IN_PROGRESS_STAGE_ID:-—}, done=${DONE_STAGE_ID:-—} (${DONE_RESOLVED_NAME:-no match}), start columns: ${TODO_SUMMARY:-—}, board moves $( [ "$DISABLED" = "1" ] && echo disabled || echo enabled )" >&2
+done < <(cut -f2 "$TASK_PROJECT_FILE" | grep -v '^$' | sort -u)
+
+if [ -z "$(cut -f2 "$TASK_PROJECT_FILE" 2>/dev/null | grep -v '^$')" ]; then
+  echo "  ⚠ Step 3.3: no project id in ${TASK_PROJECT_FILE} — board moves and the start-column filter cannot be resolved (did Step 3 run?)" >&2
 fi
 ```
 
-Outcomes (per project):
-- **Both stages found** → board moves enabled, store `WORKFLOW_ID`, `IN_PROGRESS_STAGE_ID`, `DONE_STAGE_ID`.
-- **Only `IN_PROGRESS_STAGE_ID` found** → start move enabled, done move skipped with a warning in the plan ("Project #X has no 'Internal testing' or 'Testing' column — task will stay in 'In progress' after completion.").
-- **Only `DONE_STAGE_ID` found** → start move skipped, done move enabled.
-- **Neither / no workflow** → set `BOARD_MOVE_DISABLED[$projectId]=1`, plan warning *"Project #X has no workflow — board moves disabled."*
+Outcomes (per project, read back from `board_<projectId>.tsv`):
+- **Both stages found** → board moves enabled (`workflow_id`, `in_progress_stage_id`, `done_stage_id`).
+- **Only `in_progress_stage_id` found** → start move enabled, done move skipped with a warning in the plan ("Project #X has none of the done columns 'Done - Local' / 'Internal testing' / 'Testing' — task will stay in 'In progress' after completion." — name the configured `done_stage` + fallbacks).
+- **Only `done_stage_id` found** → start move skipped, done move enabled.
+- **Neither / no workflow / `board_workflow.enabled=false`** → `disabled 1`, plan warning *"Project #X has no workflow — board moves disabled."*
+- **`todo_stage_ids` empty** (independent of the moves) → the board has none of the start columns; every task of that project ends up `wrong_stage` or `no_card` in Step 3.45, and the plan says so once for the project.
+
+Live check (GET only, 2026-09-24): on the shared *WAME workflow* (59165, e.g.
+project 736882) the defaults resolve to *Ready for Development* 300980 and
+*To Do* 300903 (start), *In Progress* 300904, *Done - Local* 301170; on the
+older board of project 700336 (workflow 58171) to *To Do* 295925 (no *Ready
+for Development*), *In progress* 295926 and — via the fallbacks — *Testing*
+295928.
+
+After Step 3.42 appended subtasks, run this snippet once more if
+`task_projects.tsv` gained a project that has no `board_<id>.tsv` yet
+(subtask in a different project than its parent) — resolved projects are
+skipped.
 
 Silent degradation: never block the run, never `AskUserQuestion` here. Report state in the plan and the final summary.
 
-### Step 3.4 — Tasklist description (when `URL_KIND=tasklist`)
+### Step 3.35 — Completed single-task URL: ask before processing (v1.5.0)
 
-Pull the tasklist's own description and surface it at the top of the plan:
+Runs only when `URL_KIND=task`. `skip_completed_tasks` drops completed tasks
+**silently** from tasklist and subtask iteration, but a URL the user pasted
+is an explicit choice — and a completed task usually sits in a done column
+(*Done - Local*, *Testing*, …) where processing it would pull the card back
+out. So the skill asks instead of guessing either way. It runs after
+Step 3.3 so the question can name the task's current column.
 
 ```bash
-TL_DESC_RAW=$(curl -sS -u "$AUTH" -H "Accept: application/json" \
-  "${BASE}/projects/api/v3/tasklists/${ENTITY_ID}.json" \
-  | jq -r '.tasklist.description // empty')
+# (run preamble — see Step 3)
+if [ "$URL_KIND" = "task" ] && [ -s "$TW_JOB_DIR/tasks.json" ]; then
+  T_STATUS=$(jq -r '.tasks[0].status // ""' "$TW_JOB_DIR/tasks.json")
+  if [ "$T_STATUS" = "completed" ]; then
+    T_NAME=$(jq -r '.tasks[0].name // ""' "$TW_JOB_DIR/tasks.json")
+    T_SID=$(jq -r '((.tasks[0].workflowStages // [])[0].stageId // 0) | tostring' "$TW_JOB_DIR/tasks.json")
+    T_COL="not on the board"
+    if [ "$T_SID" != "0" ]; then
+      T_COL=$(awk -F '\t' -v id="$T_SID" '$1 == id { print $2; exit }' "$TW_JOB_DIR/stage_names.tsv")
+      [ -n "$T_COL" ] || T_COL="column #${T_SID} (name unresolved — Step 3.3)"
+    fi
+    # printf, not echo — zsh's echo would expand backslashes in the task name.
+    printf '  ⚠ [#%s] %s is COMPLETED in Teamwork (board: %s) — ask the user before processing it\n' \
+      "$ENTITY_ID" "$T_NAME" "$T_COL" >&2
+  else
+    echo "  ℹ [#${ENTITY_ID}] status: ${T_STATUS:-unknown} — no completed-task question" >&2
+  fi
+fi
+```
 
-# Strip HTML tags down to plain text (best-effort sed; sufficient for plan rendering)
-TASKLIST_DESCRIPTION=$(echo "$TL_DESC_RAW" | sed -E 's|<[^>]+>||g' | sed -E 's/[[:space:]]+/ /g; s/^ +//; s/ +$//')
+When the snippet printed the `COMPLETED` line, ask via **AskUserQuestion**
+before anything else (plan, timer, board move):
+
+> *Task #<id> "<name>" is already completed in Teamwork (board: <column>).
+> Processing it reworks a finished task: its card moves out of <column> to
+> In progress when work starts and on to the done target (Done - Local,
+> fallbacks Internal testing → Testing) after the time log, and time is
+> logged on the completed task. The skill does not reopen the task.*
+
+- **Skip it — end the run** *(recommended, default)* — print one line
+  (*"[#<id>] completed — skipped at the user's request; nothing changed."*)
+  and end the run here: no plan, no timer, no commit, no board move, no
+  time log — none of the later steps run.
+- **Process it anyway** — continue with Step 3.4. The plan entry's stage
+  reads *"<column> — completed task, processing confirmed"*, so the board
+  move out of the done column is visible before approval.
+
+Subtasks of a processed parent still follow `skip_completed_tasks` silently
+(Step 3.42) — the question is asked once, for the URL the user pasted.
+
+### Step 3.4 — Tasklist description (when `URL_KIND=tasklist`)
+
+Pull the tasklist's own description (fetched in Step 3; `null` when the
+tasklist answered 404) and surface it at the top of the plan:
+
+```bash
+# (run preamble — see Step 3)
+TL_DESC_RAW=$(jq -r '.tasklist.description // empty' "$TW_JOB_DIR/tasks.json")
+
+# Strip HTML tags down to plain text (best-effort; sufficient for plan
+# rendering). printf, not echo — zsh's echo expands backslashes in the text.
+TASKLIST_DESCRIPTION=$(printf '%s\n' "$TL_DESC_RAW" | sed -E 's|<[^>]+>||g' \
+  | tr '\n' ' ' | sed -E 's/[[:space:]]+/ /g; s/^ +//; s/ +$//')
 ```
 
 If `TASKLIST_DESCRIPTION` is non-empty, render it in Step 4 under a `## Tasklist context` heading.
@@ -535,11 +955,12 @@ board move, time log — exactly like a standalone task.
   `TYPE(scope)[<subtaskId>]: …` commit and its own `POST /tasks/{subtaskId}/time.json`
   entry (sequential, non-overlapping, per Step 5.5 cursor).
 - **Per-subtask board moves.** Each subtask moves itself
-  *In progress → Internal testing* on its own board.
+  *In progress → Done - Local* (fallbacks *Internal testing* → *Testing*) on
+  its own board.
 - **Filter applies to subtasks.** When Step 3.45 (Tasklist filter) runs after
-  this step, it operates on the expanded set — a subtask in the wrong stage
-  or assigned to a teammate is dropped to `analyse_only` with the same rules
-  as a top-level task.
+  this step, it operates on the expanded set — a subtask outside the start
+  columns (including one that is not on the board) or assigned to a teammate
+  is dropped to `analyse_only` with the same rules as a top-level task.
 
 Skip this step entirely when:
 - `config.subtasks.enabled == false` → legacy v1.3.x behaviour (parent stays in
@@ -552,10 +973,11 @@ Skip this step entirely when:
 > for real, on every run where a task may have subtasks:
 >
 > 1. **Materialize the working set to a file.** Before the expansion loop,
->    write one `taskId<TAB>name<TAB>description` row per task fetched in Step 3
->    to `WORKING_SET_FILE` — the single parent task for a `URL_KIND=task` run,
->    or every tasklist task for a `URL_KIND=tasklist` run. The loop reads that
->    file; an empty file means the expansion is a no-op.
+>    `WORKING_SET_FILE` must hold one `taskId<TAB>name<TAB>description` row per
+>    task fetched in Step 3 — the single parent task for a `URL_KIND=task` run,
+>    or every tasklist task for a `URL_KIND=tasklist` run. Since v1.5.0 the
+>    Step 3 snippet writes it; the loop below warns when it is empty (an empty
+>    file means the expansion is a no-op).
 > 2. **Detect via the subtasks endpoint, never a count field.** Always call
 >    `GET /tasks/{id}/subtasks.json`. Do **not** trust a `subTasksCount` /
 >    `subtaskCount` field from the single-task fetch — Teamwork frequently
@@ -564,128 +986,151 @@ Skip this step entirely when:
 >    such a field for exactly this reason.)
 
 ```bash
-SUB_ENABLED=$(jq -r       '.subtasks.enabled // true'                "$CONFIG_FILE")
-SUB_MAX_DEPTH=$(jq -r     '.subtasks.max_depth // 2'                 "$CONFIG_FILE")
-SUB_PARENT_CTX=$(jq -r    '.subtasks.include_parent_context // true' "$CONFIG_FILE")
+# (run preamble — see Step 3)
+SUB_ENABLED=$(jq -r    '.subtasks.enabled                | if . == null then true else . end' "$CONFIG_FILE")
+SUB_MAX_DEPTH=$(jq -r  '.subtasks.max_depth // 2'                                               "$CONFIG_FILE")
+SUB_PARENT_CTX=$(jq -r '.subtasks.include_parent_context | if . == null then true else . end' "$CONFIG_FILE")
+SKIP_DONE=$(jq -r      '.skip_completed_tasks            | if . == null then true else . end' "$CONFIG_FILE")
+STAGE_NAMES_FILE="$TW_JOB_DIR/stage_names.tsv"      # Step 3.3: stageId<TAB>name
+TASK_PROJECT_FILE="$TW_JOB_DIR/task_projects.tsv"   # Step 3: taskId<TAB>projectId
+[ -f "$STAGE_NAMES_FILE" ] || : > "$STAGE_NAMES_FILE"
 
 if [ "$SUB_ENABLED" = "true" ]; then
-  # Working set after Step 3 is held in-memory by the skill. The pseudo-code
-  # below treats it as a stream of task JSON blobs and writes the expanded
-  # result to an auxiliary TSV that Step 3.45's TASK_STAGE_FILE loader can
-  # merge against.
+  # The expanded result goes to an auxiliary TSV that Step 3.45's
+  # TASK_STAGE_FILE loader merges against.
   #
   # File: /tmp/tw_expanded_${ENTITY_ID}.tsv
   #   format: <taskId>\t<parentTaskId>\t<stageName>\t<assigneesCSV>\t<name>
+  #   An empty stage / assignee list is written as "-" (empty TSV fields
+  #   collapse under `IFS=$'\t' read`).
   #
-  # An empty parentTaskId means "top-level task" (kept as-is). A non-empty
-  # parentTaskId means "subtask that replaced its parent in the working set".
+  # Every row is a subtask that replaced its parent in the working set.
 
   EXPANDED_FILE="/tmp/tw_expanded_${ENTITY_ID}.tsv"
   PARENT_CTX_FILE="/tmp/tw_parent_context_${ENTITY_ID}.tsv"
   : > "$EXPANDED_FILE"
   : > "$PARENT_CTX_FILE"
 
-  # Recursive expander. Bash 3.2-safe — no associative arrays, no `mapfile`.
+  # Subtasks that count: with skip_completed_tasks=true a completed subtask is
+  # ignored, so a parent whose subtasks are all done stays a normal task.
+  SUB_COUNT_JQ='[(.tasks // .subtasks // [])[] | select($skip != "true" or .status != "completed")] | length'
+
+  # Recursive expander. Bash 3.2 / zsh-safe — no associative arrays, no
+  # `mapfile`, every `local` declared once at the top.
   expand_subtasks() {
-    local TID="$1"
-    local DEPTH="$2"
-    local PARENT_NAME="$3"
-    local PARENT_DESC="$4"
+    local TID="$1" DEPTH="$2" PARENT_NAME="$3" PARENT_DESC="$4"
+    local HTTP="" BODY="" SUB_JSON="" SUB_COUNT="" STID="" S_NAME="" S_DESC=""
+    local TMP="${TW_JOB_DIR}/subtasks_${TID}.json"
 
     if [ "$DEPTH" -gt "$SUB_MAX_DEPTH" ]; then
-      return
+      return 0
     fi
 
     # Primary endpoint (v3). Tolerates `.tasks[]` and `.subtasks[]` shapes
-    # because v3 has shipped both at different times.
-    local SUB_JSON
-    SUB_JSON=$(curl -sS -u "$AUTH" -H "Accept: application/json" \
-      "${BASE}/projects/api/v3/tasks/${TID}/subtasks.json?pageSize=100&page=1&include=cards,stages")
+    # because v3 has shipped both at different times. This loop fires one GET
+    # per task, which can hit Teamwork's rate limit on a big tasklist:
+    # `--retry 3` retries HTTP 429 / 5xx with backoff (honouring Retry-After),
+    # and the body goes to a file because on stdout curl would concatenate
+    # every failed attempt's body in front of the good one.
+    HTTP=$(curl -sS --retry 3 --retry-max-time 120 -u "$AUTH" -H "Accept: application/json" \
+      -o "$TMP" -w '%{http_code}' \
+      "${BASE}/projects/api/v3/tasks/${TID}/subtasks.json?pageSize=100&page=1")
+    SUB_JSON=$(cat "$TMP" 2>/dev/null)
+    if [ "$HTTP" != "200" ]; then
+      echo "  ⚠ GET /projects/api/v3/tasks/${TID}/subtasks.json → HTTP ${HTTP} — trying the parentTaskId fallback" >&2
+    elif ! SUB_COUNT=$(jq --arg skip "$SKIP_DONE" "$SUB_COUNT_JQ" <<<"$SUB_JSON"); then
+      echo "  ⚠ /tasks/${TID}/subtasks.json is not valid JSON — trying the parentTaskId fallback" >&2
+      SUB_COUNT=""
+    fi
 
-    local SUB_COUNT
-    SUB_COUNT=$(echo "$SUB_JSON" | jq '[(.tasks // .subtasks // [])[]] | length' 2>/dev/null || echo 0)
-
-    # Fallback when the primary endpoint returns nothing. WARNING: some Teamwork
-    # instances IGNORE the parentTaskIds query filter and return the WHOLE
-    # project, so we filter client-side to children whose parentTaskId == TID —
-    # otherwise a genuine leaf parent would absorb every task in the project as
-    # a bogus "subtask".
-    if [ "${SUB_COUNT:-0}" = "0" ]; then
-      SUB_JSON=$(curl -sS -u "$AUTH" -H "Accept: application/json" \
-        "${BASE}/projects/api/v3/tasks.json?parentTaskIds=${TID}&pageSize=100&page=1&include=cards,stages")
-      SUB_JSON=$(echo "$SUB_JSON" | jq --argjson pid "${TID:-0}" \
-        '.tasks = [((.tasks // .subtasks // [])[] | select((.parentTaskId // 0) == $pid))]' 2>/dev/null || echo "$SUB_JSON")
-      SUB_COUNT=$(echo "$SUB_JSON" | jq '[(.tasks // .subtasks // [])[]] | length' 2>/dev/null || echo 0)
+    # Fallback only when the primary endpoint FAILED (a 200 with 0 rows is a
+    # genuine leaf). The filter is the SINGULAR `parentTaskId=`: v3 silently
+    # IGNORES the plural `parentTaskIds=` and returns the first 100 tasks of
+    # the whole site (verified live: 100 rows, 7 unrelated parent ids,
+    # hasMore:true), which the client-side filter below then reduced to a
+    # bogus "0 subtasks". The client-side filter to children whose
+    # parentTaskId == TID stays as a guard.
+    if [ -z "$SUB_COUNT" ]; then
+      HTTP=$(curl -sS --retry 3 --retry-max-time 120 -u "$AUTH" -H "Accept: application/json" \
+        -o "$TMP" -w '%{http_code}' \
+        "${BASE}/projects/api/v3/tasks.json?parentTaskId=${TID}&pageSize=100&page=1")
+      BODY=$(cat "$TMP" 2>/dev/null)
+      if [ "$HTTP" = "200" ] && SUB_JSON=$(jq --argjson pid "$TID" \
+           '.tasks = [((.tasks // .subtasks // [])[] | select((.parentTaskId // 0) == $pid))]' <<<"$BODY"); then
+        SUB_COUNT=$(jq --arg skip "$SKIP_DONE" "$SUB_COUNT_JQ" <<<"$SUB_JSON")
+      else
+        echo "  ⚠ Step 3.42: subtasks of #${TID} could not be read (fallback HTTP ${HTTP}) — #${TID} stays in the working set as a leaf; any subtasks it has are NOT expanded" >&2
+        SUB_COUNT=0
+      fi
     fi
 
     if [ "${SUB_COUNT:-0}" = "0" ]; then
-      return  # leaf — caller keeps the parent task in the working set
+      return 0  # leaf (or only completed subtasks) — the parent stays in the working set
     fi
 
     # Cache parent context (rendered in Step 4 if SUB_PARENT_CTX=true).
     printf "%s\t%s\t%s\n" "$TID" "$PARENT_NAME" "$PARENT_DESC" >> "$PARENT_CTX_FILE"
 
-    # Emit one TSV row per subtask. Extract stage name from .included.stages
-    # when present (same shape as Step 3.45's tasklist endpoint).
-    echo "$SUB_JSON" | jq -r --arg PID "$TID" '
-      ((.included.stages // {}) | (
-        if (type) == "object" then to_entries | map({key:.key, value:(.value.name // "")})
-        elif (type) == "array" then map({key:(.id|tostring), value:(.name // "")})
-        else [] end
-      )) as $stages
-      |
-      ((.included.cards // {}) | (
-        if (type) == "object" then to_entries | map({key:.key, value:(.value.stageId|tostring)})
-        elif (type) == "array" then map({key:(.id|tostring), value:(.stageId|tostring)})
-        else [] end
-      )) as $cards
-      |
-      (.tasks // .subtasks // [])
-      | map(
-          . as $t
-          | (($cards | map(select(.key == (($t.cardId // .card_id // "")|tostring))) | first).value // "") as $stageId
-          | (($stages | map(select(.key == $stageId)) | first).value // "") as $stageName
-          | ($t.assignees // []) as $assignees
-          | {
-              id:        ($t.id|tostring),
-              parent:    $PID,
-              stage:     $stageName,
-              assignees: ([($assignees[]?.id // empty)] | map(tostring) | join(",")),
-              name:      ($t.name // "")
-            }
-        )
-      | .[]
-      | [.id, .parent, .stage, .assignees, .name] | @tsv
-    ' >> "$EXPANDED_FILE"
+    # Project id per subtask — v3 has no `projectId` on task objects; it lives
+    # in `.tasklist.meta.projectId`. Steps 3.3 / 6.1.5 / 6.8.5 read this file.
+    jq -r '(.tasks // .subtasks // [])[]
+      | [(.id | tostring), ((.projectId // .tasklist.meta.projectId // "") | tostring)] | @tsv' \
+      <<<"$SUB_JSON" >> "$TASK_PROJECT_FILE"
 
-    # Recurse into each subtask in case of sub-subtasks.
-    while IFS=$'\t' read -r STID _; do
+    # One TSV row per subtask. The board column comes from the subtask's own
+    # `workflowStages[0].stageId` (0 = not on the board), resolved to a name via
+    # Step 3.3's stage table — `?include=cards,stages` returns nothing here.
+    # A stage id with no name (Step 3.3 failed or has not seen this project
+    # yet) is written as "?<stageId>" — NOT "-": the subtask IS on a board,
+    # and Step 3.45 must not mistake an unreadable column for "not on it".
+    jq -r --arg PID "$TID" --arg skip "$SKIP_DONE" --rawfile sn "$STAGE_NAMES_FILE" '
+      ($sn | split("\n") | map(select(length > 0) | split("\t") | {key: .[0], value: .[1]})
+           | from_entries) as $stageNames
+      | (.tasks // .subtasks // [])[]
+      | select($skip != "true" or .status != "completed")
+      | (((.workflowStages // [])[0].stageId // 0) | tostring) as $sid
+      | [ (.id | tostring),
+          $PID,
+          (if $sid == "0" then "-" else ($stageNames[$sid] // ("?" + $sid)) end),
+          (((.assigneeUserIds // [(.assignees // [])[]?.id]) | map(tostring) | join(","))
+             | if . == "" then "-" else . end),
+          (.name // "")
+        ] | @tsv
+    ' <<<"$SUB_JSON" >> "$EXPANDED_FILE"
+
+    # Recurse into each subtask in case of sub-subtasks. Name + description
+    # come from the same response — no extra fetch per child.
+    while IFS=$'\t' read -r STID S_NAME S_DESC; do
       [ -z "$STID" ] && continue
-      # Pull child's name+desc for further recursion context.
-      local CHILD_JSON CHILD_NAME CHILD_DESC
-      CHILD_JSON=$(curl -sS -u "$AUTH" -H "Accept: application/json" \
-        "${BASE}/projects/api/v3/tasks/${STID}.json")
-      CHILD_NAME=$(echo "$CHILD_JSON" | jq -r '.task.name // ""')
-      CHILD_DESC=$(echo "$CHILD_JSON" | jq -r '.task.description // ""' | sed -E 's|<[^>]+>||g' | tr -d '\n' | cut -c1-300)
-      expand_subtasks "$STID" $((DEPTH + 1)) "$CHILD_NAME" "$CHILD_DESC"
-    done < <(echo "$SUB_JSON" | jq -r '(.tasks // .subtasks // [])[] | [(.id|tostring), ""] | @tsv')
+      [ "$S_DESC" = "-" ] && S_DESC=""
+      expand_subtasks "$STID" $((DEPTH + 1)) "$S_NAME" "$S_DESC"
+    done < <(jq -r --arg skip "$SKIP_DONE" '(.tasks // .subtasks // [])[]
+      | select($skip != "true" or .status != "completed")
+      | [(.id | tostring),
+         ((.name // "") | if . == "" then "-" else . end),
+         ((.description // "") | gsub("<[^>]+>"; "") | gsub("\\s+"; " ") | .[0:300]
+           | if . == "" then "-" else . end)
+        ] | @tsv' <<<"$SUB_JSON")
   }
 
   # Iterate over the working set from Step 3 and expand parents that have
-  # subtasks. WORKING_SET_FILE MUST be written first (see the MANDATORY note
-  # above): one "taskId<TAB>name<TAB>description" row per task fetched in
-  # Step 3. This loop is fed by that file — NOT by an empty stream. If the
-  # file is missing or empty the expansion is a silent no-op and subtasks are
-  # missed (the parent then wrongly keeps the commit / board move / time log).
+  # subtasks. WORKING_SET_FILE is written by the Step 3 snippet (see the
+  # MANDATORY note above): one "taskId<TAB>name<TAB>description" row per task.
+  # If the file is missing or empty the expansion is a silent no-op and
+  # subtasks are missed (the parent then wrongly keeps the commit / board
+  # move / time log).
   WORKING_SET_FILE="/tmp/tw_working_set_${ENTITY_ID}.tsv"
   if [ ! -s "$WORKING_SET_FILE" ]; then
-    echo "  ⚠ Step 3.42: WORKING_SET_FILE ($WORKING_SET_FILE) is empty — write the Step 3 task list to it before expanding. Subtasks will be MISSED until you do." >&2
+    echo "  ⚠ Step 3.42: WORKING_SET_FILE ($WORKING_SET_FILE) is empty — run the Step 3 fetch first. Subtasks will be MISSED until you do." >&2
   fi
 
   while IFS=$'\t' read -r TID T_NAME T_DESC; do
     [ -z "$TID" ] && continue
+    [ "$T_DESC" = "-" ] && T_DESC=""
     expand_subtasks "$TID" 1 "$T_NAME" "$T_DESC"
   done < "$WORKING_SET_FILE"
+
+  echo "  ℹ Step 3.42: $(cut -f2 "$EXPANDED_FILE" | sort -u | grep -c .) parent(s) expanded into $(grep -c . "$EXPANDED_FILE") subtask(s)" >&2
 fi
 ```
 
@@ -704,9 +1149,13 @@ For each `(subtaskId, parentId, stage, assignees, name)` row in
    the task's own data, so subtasks are picked up automatically once they are
    in the working set).
 3. **Carry the stage + assignees** into Step 3.45's `TASK_STAGE_FILE` so the
-   filter has the data it needs. Concretely: when Step 3.45 builds
-   `TASK_STAGE_FILE`, merge rows from `EXPANDED_FILE` for any subtask that
+   filter has the data it needs. The Step 3.45 snippet does this: it drops
+   every expanded parent and appends the `EXPANDED_FILE` rows for any subtask
    the tasklist endpoint did not return on its own.
+3a. **Carry the project id** — the expander appends `subtaskId<TAB>projectId`
+   to `$TW_JOB_DIR/task_projects.tsv` (from `.tasklist.meta.projectId`), so
+   Step 3.3's board state and the Step 6.1.5 / 6.8.5 board moves work for
+   subtasks too.
 4. **Cache parent context** in `PARENT_CTX_FILE`. Step 4 reads it when
    `subtasks.include_parent_context == true` and renders a
    `## Parent context` section for each subtask plan with the parent's name
@@ -730,26 +1179,34 @@ hands us a parent ID:
 **Edge cases handled:**
 
 1. **`subtasks.enabled = false`** → step is a no-op; v1.3 behaviour.
-2. **`SUB_COUNT == 0`** for a task → parent has no subtasks; the parent stays
-   in the working set untouched (legacy behaviour preserved per task).
+2. **`SUB_COUNT == 0`** for a task → parent has no (open) subtasks; the
+   parent stays in the working set untouched (legacy behaviour preserved per
+   task).
 3. **API shape variance** — both `.tasks[]` and `.subtasks[]` are accepted.
-4. **Endpoint 404** on `/tasks/{id}/subtasks.json` → fallback to
-   `/tasks.json?parentTaskIds={id}`.
+4. **Endpoint failure** (non-200 or unparsable) on `/tasks/{id}/subtasks.json`
+   → fallback to `/tasks.json?parentTaskId={id}` (singular — v3 ignores the
+   plural `parentTaskIds`; client-side filtered as well). If
+   that fails too, a `⚠` line names the task and it stays a leaf — never a
+   silent "0 subtasks".
 5. **Runaway recursion** — `max_depth=2` (default) caps at parent →
    subtask → sub-subtask. Increase to 3+ for deeply nested projects.
 6. **Subtask in a different project than parent** — Teamwork allows this in
-   rare cases. Each subtask carries its own `projectId`; Step 3.3's workflow
-   resolution already caches per project, so a multi-project subtask set just
-   triggers extra workflow fetches. No special handling needed.
+   rare cases. Each subtask carries its own project id (in
+   `.tasklist.meta.projectId`) in `task_projects.tsv`; re-run the Step 3.3
+   snippet once after this step — it skips resolved projects and fetches only
+   the new one. Until then such a subtask's stage is `?<stageId>`; Step 3.45
+   resolves it against the refreshed stage table, and one that still does not
+   resolve stays `analyse_only` (`stage_unresolved`) — never a silent pass.
 7. **`skip_completed_tasks=true`** — applies per subtask: a completed subtask
    is dropped from the expanded set the same way a completed top-level task
-   is today.
+   is today. A parent whose subtasks are *all* completed is not expanded.
 
-### Step 3.45 — Tasklist filter: only "To Do" + assigned to me
+### Step 3.45 — Tasklist filter: only the start columns + assigned to me
 
 **This step runs only when `URL_KIND=tasklist`. Single-task URLs skip it
 entirely** — when a user opens a specific task by ID we trust that intent
-and process the task regardless of column or assignee.
+and process the task regardless of column or assignee (a completed one only
+after Step 3.35 asked).
 
 The motivation is the multi-repo Kanban reality: a single Teamwork project
 often contains both a Laravel backend and an Ionic / iOS / Vue frontend, each
@@ -767,111 +1224,170 @@ Skip this step entirely when **any** of these hold:
 
 **v1.4.0 — filter operates on the post-expansion working set.** When
 Step 3.42 replaced parent tasks with their subtasks, every subtask runs
-through the same stage + assignee rules as a standalone task. A subtask in
-the wrong column or assigned to a teammate is dropped to `analyse_only`
-exactly like a top-level task would be. Step 3.42 populates
+through the same stage + assignee rules as a standalone task. A subtask
+outside the start columns (off the board included) or assigned to a teammate
+is dropped to `analyse_only` exactly like a top-level task would be. Step 3.42 populates
 `/tmp/tw_expanded_${ENTITY_ID}.tsv` with per-subtask `stageName` and
-`assignees`; if the tasklist endpoint's `?include=cards,stages` response did
-not return a subtask (typical when subtasks are not on the parent tasklist's
-board view), Step 3.45 falls back to that file when building
-`TASK_STAGE_FILE` so the filter still has data to work with.
+`assignees`; if the tasklist endpoint did not return a subtask (typical when
+subtasks live outside the parent tasklist), Step 3.45 falls back to that file
+when building `TASK_STAGE_FILE` so the filter still has data to work with, and
+the expanded parents themselves leave the filter set.
+
+**v1.5.0 — where the column comes from.** Every v3 task object carries its
+board column in `workflowStages[0].stageId` (`0` = not on the board). The
+filter resolves that id to a name through `$TW_JOB_DIR/stage_names.tsv`
+(Step 3.3) and reuses the task list Step 3 already fetched — no second
+tasklist call. The 1.3.0–1.4.2 builds read the column from
+`?include=cards,stages`, which returns an empty `.included` on this endpoint,
+and piped the response through `echo` (broken in zsh), so the stage was
+always empty.
+
+**v1.5.0 — start columns; off the board is not a start column.** A task is
+implementable when its column is **any of** `tasklist_filter.todo_stages`
+(default *Ready for Development* and *To Do* — the two start columns of the
+shared WAME board; the older boards simply lack the first one), each name
+matched per `todo_stage_match_mode`, plus the assignee rule. Only those
+columns are implementable: a task that is **not on the board** (`stageId 0`,
+or its project has no workflow) is `analyse_only` with reason `no_card`,
+shown in the plan as *"not on the board"* — promote it from the plan when it
+is really yours. A column that cannot be named because a GET failed stays
+fail-closed `analyse_only` (`stage_unresolved`).
 
 ```bash
-TF_ENABLED=$(jq -r       '.tasklist_filter.enabled // true'                       "$CONFIG_FILE")
-TF_ONLY_MINE=$(jq -r     '.tasklist_filter.only_assigned_to_me // true'           "$CONFIG_FILE")
-TF_ANALYZE_ALL=$(jq -r   '.tasklist_filter.analyze_all_tasks // true'             "$CONFIG_FILE")
-TF_TODO_NAME=$(jq -r     '.tasklist_filter.todo_stage // "To Do"'                 "$CONFIG_FILE")
-TF_TODO_MATCH=$(jq -r    '.tasklist_filter.todo_stage_match_mode // "case_sensitive"' "$CONFIG_FILE")
+# (run preamble — see Step 3)
+USER_ID="<USER_ID from Step 2.7, empty if unresolved>"
+# Booleans: `if . == null` — jq's `// true` would turn an explicit false into true.
+TF_ENABLED=$(jq -r     '.tasklist_filter.enabled             | if . == null then true else . end' "$CONFIG_FILE")
+TF_ONLY_MINE=$(jq -r   '.tasklist_filter.only_assigned_to_me | if . == null then true else . end' "$CONFIG_FILE")
+TF_ANALYZE_ALL=$(jq -r '.tasklist_filter.analyze_all_tasks   | if . == null then true else . end' "$CONFIG_FILE")
+TF_TODO_MATCH=$(jq -r  '.tasklist_filter.todo_stage_match_mode // "case_sensitive"'              "$CONFIG_FILE")
+# Start columns, one per line — same jq as Step 3.3: `todo_stages` → legacy
+# `todo_stage` → default pair; an empty list counts as absent.
+TODO_STAGES_CLI=""   # --tasklist-todo-stage for this run (comma-separated); empty = config
+TF_TODO_STAGES=$(jq -r '
+  (.tasklist_filter.todo_stages
+     | if type == "array" then map(select(type == "string" and length > 0))
+       elif type == "string" and length > 0 then [.] else [] end
+     | if length > 0 then . else null end)
+  // (.tasklist_filter.todo_stage | if type == "string" and length > 0 then [.] else null end)
+  // ["Ready for Development", "To Do"]
+  | .[]' "$CONFIG_FILE")
+if [ -n "$TODO_STAGES_CLI" ]; then
+  TF_TODO_STAGES=$(printf '%s\n' "$TODO_STAGES_CLI" | tr ',' '\n' \
+    | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' | grep -v '^$')
+fi
+# ASCII-only lowering (LC_ALL=C), the same as Step 3.3's case-insensitive lookup.
+TF_TODO_STAGES_LC=$(printf '%s\n' "$TF_TODO_STAGES" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+# "Ready for Development" / "To Do" — for the messages below and the plan.
+TF_TODO_LABEL=$(printf '%s\n' "$TF_TODO_STAGES" | awk 'NF { printf "%s\"%s\"", (n++ ? " / " : ""), $0 }')
 
 if [ "$URL_KIND" != "tasklist" ] || [ "$TF_ENABLED" != "true" ]; then
   # Bypass — every task keeps its default `process_mode=process` from the
   # fetcher in Step 3 and the worker loop runs unchanged.
   echo "  ℹ tasklist filter disabled or single-task URL — processing all fetched tasks." >&2
 else
-  # Fetch a card view of the tasklist so we know each task's current stage.
-  # `?include=cards,stages` returns `.included.cards` (cardId → {stageId,…})
-  # and `.included.stages` (stageId → {name,…}). For tasks without a card
-  # (e.g. tasks added before the workflow was attached), the lack of a stage
-  # is treated as "not in To Do".
-  CARDS_RESP=$(curl -sS -u "$AUTH" -H "Accept: application/json" \
-    "${BASE}/projects/api/v3/tasklists/${ENTITY_ID}/tasks.json?pageSize=250&page=1&include=cards,stages")
-
-  # Build a temp lookup: taskId<TAB>stageName (lowercased) so we can compare
-  # against TF_TODO_NAME using the configured match mode below. The lookup
-  # tolerates both object-shaped (.included.cards as map) and array-shaped
-  # responses to match Step 3.3.
+  # Each task's current board column. v3 task objects carry it themselves in
+  # `workflowStages[0].stageId` (0 = not on the board); Step 3.3 resolved the
+  # project's stage ids to names in stage_names.tsv. (`?include=cards,stages`
+  # returns an EMPTY `.included` and `cardId: null` on the tasks endpoints, so
+  # the 1.3.0–1.4.2 card lookup gave every task an empty stage.)
+  # Build "<taskId>\t<stageName>\t<assigneesCSV>" rows from Step 3's
+  # tasks.json — empty stage / assignees are written as "-" so the columns
+  # cannot collapse under `IFS=$'\t' read`. A stage id that does not resolve
+  # to a name is written as "?<stageId>": the task IS on a board, only its
+  # column is unreadable (Step 3.3 failed) — that must not pass as "no card".
+  STAGE_NAMES_FILE="$TW_JOB_DIR/stage_names.tsv"
   TASK_STAGE_FILE="/tmp/tw_task_stages_${ENTITY_ID}.tsv"
-  echo "$CARDS_RESP" | jq -r '
-    # 1) Build (cardId -> stageName) map.
-    (
-      if (.included.cards | type) == "object" then
-        .included.cards | to_entries | map({key:.key, value:.value.stageId|tostring})
-      elif (.included.cards | type) == "array" then
-        .included.cards | map({key:(.id|tostring), value:(.stageId|tostring)})
-      else [] end
-    ) as $cards
-    |
-    (
-      if (.included.stages | type) == "object" then
-        .included.stages | to_entries | map({key:.key, value:(.value.name // "")})
-      elif (.included.stages | type) == "array" then
-        .included.stages | map({key:(.id|tostring), value:(.name // "")})
-      else [] end
-    ) as $stages
-    |
-    # 2) Resolve every task to "<taskId>\t<stageName>" (stageName may be empty).
-    (.tasks // .data // [])
-    | map({
-        id: (.id|tostring),
-        cardId: ((.cardId // .card_id // "") | tostring),
-        assignees: ([(.assignees[]?.id // .assignedUserIds[]? // empty)] | map(tostring))
-      })
-    | map(
-        . as $t
-        | ($cards | map(select(.key == $t.cardId)) | first) as $card
-        | ($card.value // "") as $stageId
-        | ($stages | map(select(.key == $stageId)) | first) as $stage
-        | $t + {stageName: ($stage.value // "")}
-      )
-    | .[]
-    | "\(.id)\t\(.stageName)\t\(.assignees | join(","))"
-  ' > "$TASK_STAGE_FILE"
+  [ -s "$STAGE_NAMES_FILE" ] || echo "  ⚠ Step 3.45: ${STAGE_NAMES_FILE} is empty (Step 3.3 not run, or it failed / found no workflow) — tasks on a board become 'stage_unresolved', tasks off the board 'no_card' (both analyse-only)" >&2
+  [ -f "$STAGE_NAMES_FILE" ] || : > "$STAGE_NAMES_FILE"
+
+  if ! jq -r --rawfile sn "$STAGE_NAMES_FILE" '
+      ($sn | split("\n") | map(select(length > 0) | split("\t") | {key: .[0], value: .[1]})
+           | from_entries) as $stageNames
+      | .tasks[]
+      | (((.workflowStages // [])[0].stageId // 0) | tostring) as $sid
+      | [ (.id | tostring),
+          (if $sid == "0" then "-" else ($stageNames[$sid] // ("?" + $sid)) end),
+          (((.assigneeUserIds // [(.assignees // [])[]?.id]) | map(tostring) | join(","))
+             | if . == "" then "-" else . end)
+        ] | @tsv' "$TW_JOB_DIR/tasks.json" > "$TASK_STAGE_FILE"; then
+    echo "  ⚠ Step 3.45: could not read ${TW_JOB_DIR}/tasks.json — the filter has no data; re-run Step 3 (every task would otherwise be skipped)" >&2
+  fi
+
+  # v1.4.0 subtasks: drop every parent that Step 3.42 replaced, then append
+  # the subtask rows the tasklist endpoint did not return on its own.
+  EXPANDED_FILE="/tmp/tw_expanded_${ENTITY_ID}.tsv"
+  if [ -s "$EXPANDED_FILE" ]; then
+    awk -F '\t' -v OFS='\t' '
+      FNR == NR { parent[$2] = 1; row[$1] = $1 OFS $3 OFS $4; order[++n] = $1; next }
+      !($1 in parent) { print; seen[$1] = 1 }
+      END { for (i = 1; i <= n; i++) { id = order[i]
+              if (!(id in seen) && !(id in parent)) { print row[id]; seen[id] = 1 } } }
+    ' "$EXPANDED_FILE" "$TASK_STAGE_FILE" > "${TASK_STAGE_FILE}.merged" \
+      && mv "${TASK_STAGE_FILE}.merged" "$TASK_STAGE_FILE"
+  fi
+
+  # A "?<stageId>" that Step 3.42 wrote before Step 3.3 knew the subtask's
+  # project resolves here once Step 3.3 was re-run. (Guarded by -s: with an
+  # empty first file awk's FNR == NR would swallow the second file.)
+  if [ -s "$STAGE_NAMES_FILE" ]; then
+    awk -F '\t' -v OFS='\t' '
+      FNR == NR { name[$1] = $2; next }
+      substr($2, 1, 1) == "?" && (substr($2, 2) in name) { $2 = name[substr($2, 2)] }
+      { print }
+    ' "$STAGE_NAMES_FILE" "$TASK_STAGE_FILE" > "${TASK_STAGE_FILE}.resolved" \
+      && mv "${TASK_STAGE_FILE}.resolved" "$TASK_STAGE_FILE"
+  fi
 
   # For each task, set process_mode:
   #   "process"           → fully run (implement, commit, log, board move)
   #   "analyse_only"      → fetch + plan-time analysis, but worker loop skips
   #
   # Reason codes (rendered in the plan as "Skip reason: …"):
-  #   "wrong_stage"       → stage != configured To Do
+  #   "wrong_stage(<name>)" → the column is none of the start columns
   #   "wrong_assignee"    → assignees do not include current user
   #   "wrong_stage+wrong_assignee" → both conditions failed
-  #   "no_card"           → task has no card (no workflow attached)
+  #   "no_card"           → task is not on the board (stageId 0) or its
+  #                         project has no workflow — it has no start column,
+  #                         so it is analyse_only (1.5.0; the plan says "not
+  #                         on the board"; promote it there if it is yours)
+  #   "stage_unresolved(<id>)" → the task IS on a board but its stage id has
+  #                         no name (Step 3.3 failed or never saw the
+  #                         project) — fail closed: analyse_only, never a pass
 
+  # PROCESS_FILE rows: taskId<TAB>mode<TAB>detail — detail is the matched
+  # start column for `process` (the plan's "stage:"), the reason codes above
+  # for `analyse_only` / `drop`.
   PROCESS_FILE="/tmp/tw_tasks_process_${ENTITY_ID}.tsv"
   : > "$PROCESS_FILE"
 
   while IFS=$'\t' read -r T_ID T_STAGE T_ASSIGNEES; do
     [ -z "$T_ID" ] && continue
+    [ "$T_STAGE" = "-" ] && T_STAGE=""
+    [ "$T_ASSIGNEES" = "-" ] && T_ASSIGNEES=""
 
     REASONS=""
 
     # --- Stage check -------------------------------------------------------
+    # Implementable only in one of the start columns. Off the board and an
+    # unreadable column both fail (see reason codes above).
     STAGE_OK=0
     if [ -z "$T_STAGE" ]; then
       REASONS="no_card"
+    elif [ "${T_STAGE:0:1}" = "?" ]; then
+      REASONS="stage_unresolved(${T_STAGE:1})"
     else
-      case "$TF_TODO_MATCH" in
-        case_insensitive)
-          if [ "$(echo "$T_STAGE" | tr '[:upper:]' '[:lower:]')" = \
-               "$(echo "$TF_TODO_NAME" | tr '[:upper:]' '[:lower:]')" ]; then
-            STAGE_OK=1
-          fi
-          ;;
-        *)
-          # case_sensitive (default) — strict string equality
-          [ "$T_STAGE" = "$TF_TODO_NAME" ] && STAGE_OK=1
-          ;;
-      esac
+      if [ "$TF_TODO_MATCH" = "case_insensitive" ]; then
+        T_STAGE_CMP=$(printf '%s' "$T_STAGE" | LC_ALL=C tr '[:upper:]' '[:lower:]')
+        STAGE_LIST="$TF_TODO_STAGES_LC"
+      else
+        # case_sensitive (default) — strict string equality per column
+        T_STAGE_CMP="$T_STAGE"
+        STAGE_LIST="$TF_TODO_STAGES"
+      fi
+      while IFS= read -r TS; do
+        [ -n "$TS" ] && [ "$T_STAGE_CMP" = "$TS" ] && { STAGE_OK=1; break; }
+      done <<<"$STAGE_LIST"
       [ "$STAGE_OK" -eq 0 ] && REASONS="wrong_stage(${T_STAGE})"
     fi
 
@@ -884,22 +1400,19 @@ else
         ASSIGNEE_OK=1
       else
         # Comma-separated list of numeric IDs; membership check.
-        if echo ",${T_ASSIGNEES}," | grep -q ",${USER_ID},"; then
-          ASSIGNEE_OK=1
-        else
-          ASSIGNEE_OK=0
-          if [ -n "$REASONS" ]; then
-            REASONS="${REASONS}+wrong_assignee"
-          else
-            REASONS="wrong_assignee"
-          fi
-        fi
+        case ",${T_ASSIGNEES}," in
+          *",${USER_ID},"*) ASSIGNEE_OK=1 ;;
+          *)
+            ASSIGNEE_OK=0
+            REASONS="${REASONS:+${REASONS}+}wrong_assignee"
+            ;;
+        esac
       fi
     fi
 
     # --- Decide mode ------------------------------------------------------
     if [ "$STAGE_OK" -eq 1 ] && [ "$ASSIGNEE_OK" -eq 1 ]; then
-      printf "%s\tprocess\t\n" "$T_ID" >> "$PROCESS_FILE"
+      printf "%s\tprocess\t%s\n" "$T_ID" "$T_STAGE" >> "$PROCESS_FILE"
     else
       if [ "$TF_ANALYZE_ALL" = "true" ]; then
         printf "%s\tanalyse_only\t%s\n" "$T_ID" "$REASONS" >> "$PROCESS_FILE"
@@ -916,7 +1429,12 @@ else
   TF_COUNT_DROP=$(   awk -F '\t' '$2 == "drop"         { c++ } END { print c+0 }' "$PROCESS_FILE")
   TF_COUNT_TOTAL=$(  awk -F '\t' 'END { print NR+0 }'                       "$PROCESS_FILE")
 
-  echo "  ℹ tasklist filter: ${TF_COUNT_PROCESS} to implement, ${TF_COUNT_ANALYSE} analyse-only, ${TF_COUNT_DROP} dropped" >&2
+  TF_COUNT_NO_CARD=$(awk -F '\t' '$2 != "process" && $3 ~ /no_card/ { c++ } END { print c+0 }' "$PROCESS_FILE")
+  echo "  ℹ tasklist filter (start columns ${TF_TODO_LABEL}): ${TF_COUNT_PROCESS} to implement, ${TF_COUNT_ANALYSE} analyse-only, ${TF_COUNT_DROP} dropped (${TF_COUNT_NO_CARD} of the skipped not on the board)" >&2
+  TF_COUNT_UNRESOLVED=$(awk -F '\t' '$3 ~ /stage_unresolved/ { c++ } END { print c+0 }' "$PROCESS_FILE")
+  if [ "$TF_COUNT_UNRESOLVED" -gt 0 ]; then
+    echo "  ⚠ ${TF_COUNT_UNRESOLVED} task(s) sit in a board column whose name could not be resolved (stage_unresolved) — kept out of the implement set; re-run Step 3.3, then this step" >&2
+  fi
 
   # --- Empty-result handling --------------------------------------------
   # If the filter dropped EVERY task into analyse_only/drop, surface a
@@ -933,7 +1451,7 @@ else
       echo "  ⚠ Tasklist filter found 0 tasks to implement out of ${TF_COUNT_TOTAL} fetched."
       echo "    Rules that were applied:"
       echo "      • URL kind        = tasklist                      (single-task URLs bypass the filter)"
-      echo "      • Stage required  = \"${TF_TODO_NAME}\"             (match mode: ${TF_TODO_MATCH})"
+      echo "      • Start columns   = ${TF_TODO_LABEL}             (any of them; match mode: ${TF_TODO_MATCH}; off the board = not implementable)"
       echo "      • Assignee check  = $( [ "$TF_ONLY_MINE" = "true" ] && echo "on (must include user ${USER_HINT})" || echo "off" )"
       echo "      • analyze_all     = ${TF_ANALYZE_ALL}             (false would have dropped the rest entirely)"
       echo ""
@@ -946,13 +1464,15 @@ else
       echo "    Most common causes:"
       echo "      - the tasklist's tasks are sitting in a different column"
       echo "        (e.g. \"Backlog\", \"In progress\"); pass --tasklist-todo-stage=\"Backlog\""
+      echo "      - the tasks are not on the board (no_card) or the project has no"
+      echo "        workflow; promote them in Step 4 or pass --tasklist-filter=false"
       echo "      - the tasks are assigned to teammates; pass --tasklist-only-mine=false"
       echo "      - the project workflow uses a different casing"
       echo "        (e.g. \"to do\" vs \"To Do\"); set tasklist_filter.todo_stage_match_mode=case_insensitive"
-      echo "      - you simply have nothing assigned in \"${TF_TODO_NAME}\" right now"
+      echo "      - you simply have nothing assigned in ${TF_TODO_LABEL} right now"
       echo ""
       echo "    Step 4 will ask how to proceed — disable the filter, promote a"
-      echo "    specific task from the analyse-only list, change the stage name,"
+      echo "    specific task from the analyse-only list, change the start columns,"
       echo "    or cancel the run."
       echo ""
     } >&2
@@ -966,22 +1486,40 @@ fi
    check entirely so the user is never silently locked out of their own
    tasklist by a permission glitch. Log one warning line. The stage check
    still applies.
-2. **Project has no workflow** (Step 3.3 marked `BOARD_MOVE_DISABLED`) →
-   `TODO_STAGE_ID` is unresolved and every task ends up with empty
-   `T_STAGE`; without a stage we cannot honour the filter. Treat the entire
-   tasklist as `process` (do not block the run on a workflow that is not
-   set up yet) and surface a one-line note in the plan.
-3. **Task has no card / not on the board** → behaves the same as no
-   workflow: cannot evaluate `To Do`, falls back to `process`. The plan
-   marks it explicitly so the user sees why.
+2. **Project has no workflow** (Step 3.3 wrote `disabled 1` and no stage
+   names) → every task ends up with empty `T_STAGE`: no task has a start
+   column, so the whole tasklist is `analyse_only` (`no_card`) and Step 4.0a
+   asks how to proceed (disable the filter for this run, promote tasks, …).
+   The plan carries a one-line note that the project has no board. Nothing
+   is implemented without that explicit choice.
+3. **Task has no card / not on the board** (`workflowStages[0].stageId == 0`)
+   → `analyse_only` with `no_card` (or `no_card+wrong_assignee`); the plan
+   shows it as *"not on the board"*. Since 1.5.0 only the start columns are
+   implementable — a backlog item nobody moved onto the board is not
+   greenlit work. Promote it from the plan (Step 4) when it is yours.
+   Subtasks follow the same rule.
+3a. **Task is on a board, but its column cannot be named**
+   (`stageId != 0` with no entry in `stage_names.tsv` — the Step 3.3
+   workflows GET failed, e.g. HTTP 429, or never saw the task's project) →
+   **fail closed**: `analyse_only` with `stage_unresolved(<stageId>)` and a
+   `⚠` line — the column exists and may well be the wrong one; passing it
+   would implement tasks from arbitrary columns. Re-run Step 3.3, then this
+   step.
+3b. **Board without some start columns** — the older per-project boards have
+   *To Do* but no *Ready for Development*; the missing name simply never
+   matches. A board with **none** of them (Step 3.3 `todo_stage_ids` empty)
+   makes every task of that project `wrong_stage` / `no_card` — the plan
+   names the project once.
 4. **`analyze_all_tasks=false`** (strict mode) → tasks that fail the filter
    are *dropped* from `TASKS_TO_PROCESS` entirely — not even rendered in the
    plan. Use when the user does not want teammates' tasks polluting the
    overview.
-5. **The user passes a `tasks` URL but the task happens to be in a `To Do`
-   column owned by someone else** → still processed (single-task URL bypass
-   from the very top of this step). The skill prints one informational line
-   *"single-task URL — tasklist filter bypassed"* so the user is aware.
+5. **The user passes a `tasks` URL but the task sits in a start column
+   owned by someone else, in another column, or off the board** → still
+   processed (single-task URL bypass from the very top of this step). The
+   snippet prints one informational line (*"tasklist filter disabled or
+   single-task URL — processing all fetched tasks"*) so the user is aware. A **completed** task is the one
+   exception: Step 3.35 asks first (default: skip).
 
 Later steps (Step 3.5 fetch comments, Step 3.7 attachments, Step 3.10 local
 discovery) still run for **every** task that survived the filter — including
@@ -990,34 +1528,187 @@ informed by the same context. Only the **implementation side-effects**
 (commits, time logs, board moves, attachment cleanup that is per-task) are
 gated by `process_mode` in Step 6.
 
-### Step 3.5 — Fetch comments per task (conditional)
+### Step 3.5 — Fetch comments per task (count probe + newest always, full thread when needed)
 
-Read `fetch_comments_mode` from config. Behavior:
+Read `fetch_comments_mode` from config. The rule this step implements is the
+one Step 6.2 relies on: **the last comment is the freshest truth** — a
+comment posted after the description can change the spec. So whenever a task
+has comments, the newest one is always read; the mode only decides whether
+the *full thread* is fetched.
 
-- **`always`** → fetch comments for every task (legacy v1.0 behavior).
-- **`never`** → skip entirely.
-- **`when_needed`** (default) → fetch only if **both** of these hold:
-  1. `task.commentsCount > 0` (cheap short-circuit; no comments to read anyway).
-  2. At least one of:
+- **`always`** → full thread for every task that has comments.
+- **`never`** → skip entirely (no probe either); the plan says *"comments not
+  read (fetch_comments_mode=never)"*.
+- **`when_needed`** (default) → one cheap probe per task returns the comment
+  **count** and the **newest comment** in a single call:
+  1. `count == 0` → nothing to read.
+  2. `count >= 1` → the newest comment is **always** read (the probe already
+     returned it).
+  3. `count > 1` → the full thread is fetched as well when at least one of
+     these holds (`THIN_DESCRIPTION=1`):
      - `final_summary` is empty (no HR found in description — see Step 3.6), OR
      - `len(strip_html(acceptance_criteria)) < 100`, OR
-     - The description matches `(viď|see|viz)[[:space:]]+(komentár|comment|comments|nižšie|below)` (case-insensitive).
+     - The description matches `(viď|see|viz)[[:space:]]+(komentár|comment|comments|nižšie|below)` (case-insensitive), OR
+     - the newest comment itself refers back to earlier ones (*"ako som písal
+       vyššie"*, *"see above"*) or contradicts the description. You only know
+       this after the first run has read it (`comments_<taskId>.json`), so
+       re-run the snippet with `THIN_DESCRIPTION="1"` in that case — the
+       probe is one cheap request.
 
-When fetching:
+Up to 1.4.2 the mode gated on a comment-count field v3 never returns, so
+`when_needed` never fetched anything, and even `always` asked for a sort key
+v3 does not know — HTTP 400 `orderBy: unknown comment sort.`, whose error body
+was then parsed as an empty list. Valid v3 sorts are `orderBy=date`
+(chronological, `orderMode=asc|desc`) and `orderBy=id`; the timestamp field
+is `postedDateTime`.
+
+v3 / v1 field map (the v1 endpoint is the fallback when v3 fails):
+
+| Datum | v3 (`/projects/api/v3/tasks/{id}/comments.json`) | v1 (`/tasks/{id}/comments.json`) |
+| --- | --- | --- |
+| time | `postedDateTime` (`2026-08-14T09:32:28Z`) | `datetime` (`post-date` is null) |
+| HTML body | `htmlBody` (plain text: `body`) | `html-body` (plain text: `body`) |
+| author | `postedByUserId` / `postedBy` (id only) | `author-id`, `author-firstname`, `author-lastname` |
+| files | `files[] = {id, type}`, resolved via `?include=files` → `.included.files` (`fileIds` may be null) | `attachments[]` (`id`, `name`, `size`) |
+| count | `.meta.page.count` of the comments list | `."todo-item"."comments-count"` of `GET /tasks/{id}.json` |
+| order | `orderBy=date&orderMode=asc` | none guaranteed — always `sort_by(.datetime)` |
+
+Both are normalized into `$TW_JOB_DIR/comments_<taskId>.json` — a
+chronological array of `{id, postedDateTime, postedByUserId, author,
+htmlBody, body, files: [{id, name, size, downloadURL}]}` (v3 field names) that
+Steps 3.8, 6.0 and 6.2 read.
+
 ```bash
-curl -sS -u "$AUTH" -H "Accept: application/json" \
-  "${BASE}/projects/api/v3/tasks/${TASK_ID}/comments.json?pageSize=100&page=1&orderBy=postedAt&orderMode=asc"
+# (run preamble — see Step 3)
+TASK_ID="<current task id>"
+THIN_DESCRIPTION="<1 if any when_needed rule above holds, else 0>"
+MODE=$(jq -r '.fetch_comments_mode // "when_needed"' "$CONFIG_FILE")
+COMMENTS_FILE="$TW_JOB_DIR/comments_${TASK_ID}.json"
+RAW_FILE="${COMMENTS_FILE}.jsonl"; : > "$RAW_FILE"
+COMMENTS_COUNT=""; COMMENTS_SOURCE="v3"; FULL=0
+
+# jq normalizers → one comment object per line, v3 field names.
+V3_NORM='(.included.files // {}) as $f | .comments[]? | {
+  id, postedDateTime, postedByUserId: (.postedByUserId // .postedBy), author: null,
+  htmlBody: (.htmlBody // ""), body: (.body // ""),
+  files: [ (.files // [])[] | ($f[(.id | tostring)] // {}) as $d | {
+    id, name: ($d.originalName // $d.displayName // $d.name // ("file_" + (.id | tostring))),
+    size: ($d.size // 0), downloadURL: ($d.downloadURL // "") } ] }'
+V1_NORM='.comments[]? | {
+  id: (.id | tonumber), postedDateTime: .datetime,
+  postedByUserId: ((."author-id" // "0") | tonumber),
+  author: ([."author-firstname", ."author-lastname"] | map(select(. != null and . != "")) | join(" ")),
+  htmlBody: (."html-body" // ""), body: (.body // ""),
+  files: [ (.attachments // [])[] | {
+    id: (.id | tonumber), name: (.name // .filename // ("file_" + .id)),
+    size: ((.size // "0") | tonumber), downloadURL: "" } ] }'
+
+if [ "$MODE" = "never" ]; then
+  COMMENTS_STATE="not read (fetch_comments_mode=never)"
+else
+  # 1) Probe — count + newest comment in ONE call (v3).
+  RESP=$(curl -sS -u "$AUTH" -H "Accept: application/json" -w '\n%{http_code}' \
+    "${BASE}/projects/api/v3/tasks/${TASK_ID}/comments.json?pageSize=1&page=1&orderBy=date&orderMode=desc&include=files")
+  HTTP=${RESP##*$'\n'}; BODY=${RESP%$'\n'*}
+  if [ "$HTTP" = "200" ] && COMMENTS_COUNT=$(jq -e '.meta.page.count' <<<"$BODY"); then
+    jq -c "$V3_NORM" <<<"$BODY" > "$RAW_FILE"            # the newest comment
+  else
+    echo "  ⚠ GET /projects/api/v3/tasks/${TASK_ID}/comments.json (count probe) → HTTP ${HTTP}: $(jq -r '.errors[0].detail // .message // empty' <<<"$BODY" 2>/dev/null) — falling back to the v1 endpoints" >&2
+    COMMENTS_SOURCE="v1"
+    RESP=$(curl -sS -u "$AUTH" -H "Accept: application/json" -w '\n%{http_code}' "${BASE}/tasks/${TASK_ID}.json")
+    HTTP=${RESP##*$'\n'}; BODY=${RESP%$'\n'*}
+    if [ "$HTTP" = "200" ] && COMMENTS_COUNT=$(jq -e '."todo-item"."comments-count" | tonumber' <<<"$BODY"); then
+      :
+    else
+      echo "  ⚠ GET /tasks/${TASK_ID}.json (v1 comments-count) → HTTP ${HTTP} — count unknown, reading the full thread instead of assuming 0" >&2
+      COMMENTS_COUNT="unknown"
+    fi
+    FULL=1   # v1 has no newest-only probe; read the (small) thread
+  fi
+
+  # 2) Decide whether the full thread is needed.
+  if [ "$COMMENTS_COUNT" = "unknown" ]; then
+    FULL=1
+  elif [ "$COMMENTS_COUNT" -eq 0 ]; then
+    FULL=0
+  elif [ "$MODE" = "always" ] || { [ "$COMMENTS_COUNT" -gt 1 ] && [ "$THIN_DESCRIPTION" = "1" ]; }; then
+    FULL=1
+  fi
+
+  # 3) Full thread — v3 chronological, paginated; v1 when v3 fails.
+  if [ "$FULL" = "1" ] && [ "$COMMENTS_SOURCE" = "v3" ]; then
+    : > "$RAW_FILE"
+    PAGE=1
+    while :; do
+      RESP=$(curl -sS -u "$AUTH" -H "Accept: application/json" -w '\n%{http_code}' \
+        "${BASE}/projects/api/v3/tasks/${TASK_ID}/comments.json?pageSize=100&page=${PAGE}&orderBy=date&orderMode=asc&include=files")
+      HTTP=${RESP##*$'\n'}; BODY=${RESP%$'\n'*}
+      if [ "$HTTP" != "200" ] || ! jq -c "$V3_NORM" <<<"$BODY" >> "$RAW_FILE"; then
+        echo "  ⚠ GET /projects/api/v3/tasks/${TASK_ID}/comments.json?page=${PAGE} → HTTP ${HTTP} — re-reading the thread from the v1 endpoint" >&2
+        COMMENTS_SOURCE="v1"
+        break
+      fi
+      [ "$(jq -r '.meta.page.hasMore // false' <<<"$BODY")" = "true" ] || break
+      PAGE=$((PAGE + 1))
+    done
+  fi
+  if [ "$FULL" = "1" ] && [ "$COMMENTS_SOURCE" = "v1" ]; then
+    : > "$RAW_FILE"
+    PAGE=1
+    while :; do
+      RESP=$(curl -sS -u "$AUTH" -H "Accept: application/json" -w '\n%{http_code}' \
+        "${BASE}/tasks/${TASK_ID}/comments.json?page=${PAGE}&pageSize=100")
+      HTTP=${RESP##*$'\n'}; BODY=${RESP%$'\n'*}
+      if [ "$HTTP" != "200" ] || ! jq -c "$V1_NORM" <<<"$BODY" >> "$RAW_FILE"; then
+        echo "  ⚠ GET /tasks/${TASK_ID}/comments.json?page=${PAGE} (v1) → HTTP ${HTTP} — comments for #${TASK_ID} are INCOMPLETE; say so in the plan" >&2
+        break
+      fi
+      [ "$(jq '.comments | length' <<<"$BODY")" -lt 100 ] && break
+      PAGE=$((PAGE + 1))
+    done
+  fi
+
+  # 4) Normalize: chronological, deduplicated.
+  READ_COUNT=$(grep -c . "$RAW_FILE")
+  if [ "$COMMENTS_COUNT" = "0" ]; then
+    COMMENTS_STATE="none (0 comments)"
+  elif [ "$FULL" = "1" ]; then
+    COMMENTS_STATE="${READ_COUNT} of ${COMMENTS_COUNT} comments read — full thread (${COMMENTS_SOURCE})"
+  else
+    COMMENTS_STATE="newest of ${COMMENTS_COUNT} read — full thread not fetched (description self-contained)"
+  fi
+fi
+jq -s 'unique_by(.id) | sort_by(.postedDateTime)' "$RAW_FILE" > "$COMMENTS_FILE"
+echo "  ℹ [#${TASK_ID}] comments: ${COMMENTS_STATE}" >&2
 ```
 
-Paginate while `.meta.page.hasMore == true`. Strip HTML tags from `htmlBody` to a plain-text body for context (keep author + posted timestamp). Keep comments in chronological order — the **last comment is the freshest truth** when it conflicts with earlier ones.
+`COMMENTS_STATE` is what the plan's **Comments context** line starts with
+(Step 4). If `READ_COUNT` is lower than a known `COMMENTS_COUNT` after a full
+read, the plan says so — never render a partial thread as the whole story.
 
-For each fetched comment, retain the list of `comment.files` / `comment.attachments` for Step 3.8.
+Strip HTML from `htmlBody` (or use the plain `body`) for context, keep author +
+`postedDateTime`. Keep comments in chronological order — the **last comment is
+the freshest truth** when it conflicts with earlier ones or with the
+description.
+
+For each fetched comment, `files[]` (name, size, `downloadURL`) feeds Step 3.8.
 
 ### Step 3.6 — Parse task description (acceptance criteria + final summary)
 
 Project convention: the task description is split by a horizontal rule (`<hr>`, `<hr/>`, `<hr />` in HTML, or a Markdown `---` / `***` / `___` on its own line). The content **above** the HR is the **acceptance criteria** (what must be true to consider the task done); the content **below** the HR is the **final summary / decision** — treat this as the authoritative goal.
 
-For each task, split the description on the **first** HR occurrence:
+**Canonical WAME format first (v1.5.0).** When the description has an
+`## Akceptačné kritériá` / `## Acceptance criteria` heading — the format
+`teamwork-task-analyze`, `-from-desk`, `-from-session` and `-from-dnr` write
+(`[preamble] → HR → AC → HR → Cieľ → HR → Technický popis`) —
+`acceptance_criteria` is the block from that heading to the next HR,
+**including** its `### Prierezové požiadavky` / `### Cross-cutting requirements`
+sub-block (Step 6.2 takes those items as given requirements for the matching
+dimension); `final_summary` is everything below that HR; any text above the
+first HR is the reporter's preamble — context, not criteria. The first-HR split
+below would hand the preamble (or nothing, when the description starts with the
+HR) to Step 6 as the checklist. `/teamwork-task-test` locates the block the
+same way. Otherwise split the description on the **first** HR occurrence:
 - If exactly one HR is found → `acceptance_criteria = above`, `final_summary = below`.
 - If no HR is found → treat the whole description as `acceptance_criteria`, leave `final_summary` empty (warn in the plan that no final summary was provided).
 - If multiple HRs → split on the first, ignore the rest (they are likely inside the final summary).
@@ -1032,51 +1723,73 @@ SPLIT_REGEX='(<hr[[:space:]]*/?>|^[[:space:]]*(---|\*\*\*|___)[[:space:]]*$)'
 
 ### Step 3.7 — Fetch task attachments
 
-If `config.fetch_attachments == true`, fetch the file list for each task and download into a local working folder:
+If `config.fetch_attachments == true`, fetch the file list for each task and download into a local working folder.
+
+The attachments live on the task object: `.task.attachments` holds
+`{id, type: "files"}` references, and `?include=attachments` resolves them in
+`.included.files` (keyed by id: `originalName`, `displayName`, `size`,
+`downloadURL`). The endpoints used up to 1.4.2 are unusable:
+`/projects/api/v3/tasks/{id}/files.json` answers **404**, and the
+`/projects/api/v3/files.json?taskIds={id}` "fallback" **ignores the taskIds
+filter** and returns the whole workspace's files (100 unrelated files per
+page) — never use it. `/projects/api/v3/files/{id}/download` is a 404 as well;
+the download URL comes from `downloadURL` (or `GET
+/projects/api/v3/files/{id}.json` → `.file.downloadURL`) and accepts the same
+Basic auth.
 
 ```bash
+# (run preamble — see Step 3)
+TASK_ID="<current task id>"
 ATTACH_DIR="./teamwork-task-${TASK_ID}"
 rm -rf "$ATTACH_DIR"          # clean any leftover from a prior failed run
 mkdir -p "$ATTACH_DIR"
 
 MAX_MB=$(jq -r '.max_attachment_size_mb // 25' "$CONFIG_FILE")
 MAX_BYTES=$(( MAX_MB * 1024 * 1024 ))
+FILES_LIST="$TW_JOB_DIR/files_${TASK_ID}.tsv"    # id<TAB>name<TAB>size<TAB>downloadURL
+SKIPPED_FILE="$TW_JOB_DIR/skipped_attachments.txt"   # rendered in Step 7
 
-# Primary endpoint
-FILES_JSON=$(curl -sS -u "$AUTH" -H "Accept: application/json" \
-  "${BASE}/projects/api/v3/tasks/${TASK_ID}/files.json?pageSize=100&page=1")
-
-# Fallback if 404 / shape unexpected
-if ! echo "$FILES_JSON" | jq -e '.files // .data // empty' >/dev/null 2>&1; then
-  FILES_JSON=$(curl -sS -u "$AUTH" -H "Accept: application/json" \
-    "${BASE}/projects/api/v3/files.json?taskIds=${TASK_ID}&pageSize=100&page=1")
+RESP=$(curl -sS -u "$AUTH" -H "Accept: application/json" -w '\n%{http_code}' \
+  "${BASE}/projects/api/v3/tasks/${TASK_ID}.json?include=attachments")
+HTTP=${RESP##*$'\n'}; BODY=${RESP%$'\n'*}
+if [ "$HTTP" != "200" ]; then
+  echo "  ⚠ GET /projects/api/v3/tasks/${TASK_ID}.json?include=attachments → HTTP ${HTTP}: $(jq -r '.errors[0].detail // .message // empty' <<<"$BODY" 2>/dev/null) — continuing WITHOUT task attachments" >&2
+  : > "$FILES_LIST"
+elif ! jq -r '(.included.files // {}) as $f
+    | (.task.attachments // [])[]
+    | ($f[(.id | tostring)] // {}) as $d
+    | [ (.id | tostring),
+        (($d.originalName // $d.displayName // $d.name // ("file_" + (.id | tostring))) | gsub("/"; "_")),
+        (($d.size // 0) | tostring),
+        ($d.downloadURL // "") ] | @tsv' <<<"$BODY" > "$FILES_LIST"; then
+  echo "  ⚠ attachment list of #${TASK_ID} is not valid JSON — continuing WITHOUT task attachments" >&2
+  : > "$FILES_LIST"
 fi
+echo "  ℹ [#${TASK_ID}] $(grep -c . "$FILES_LIST") task attachment(s)" >&2
 
-# For each file: skip oversized ones; download by ID-prefixed filename to avoid collisions.
-# Use process substitution so SKIPPED_ATTACHMENTS+=() mutations survive the loop
-# (a piped `while read` would run in a subshell and discard them).
-while IFS= read -r FILE; do
-  [ -z "$FILE" ] && continue
-  FID=$(echo "$FILE"  | jq -r '.id')
-  FNM=$(echo "$FILE"  | jq -r '.name // .displayName // ("file_" + (.id|tostring))')
-  FSZ=$(echo "$FILE"  | jq -r '.size // 0')
-  URL=$(echo "$FILE"  | jq -r '.downloadUrl // .downloadURL // empty')
-
+# For each file: skip oversized ones; download by ID-prefixed filename to avoid
+# collisions. The loop reads a file (not a pipe), so nothing runs in a subshell.
+while IFS=$'\t' read -r FID FNM FSZ URL; do
+  [ -z "$FID" ] && continue
   if [ "${FSZ:-0}" -gt "$MAX_BYTES" ]; then
     echo "  ⚠ skipped attachment '${FNM}' (${FSZ} bytes > ${MAX_BYTES})" >&2
-    SKIPPED_ATTACHMENTS+=("${FNM} (${FSZ} bytes)")
+    printf '%s (%s bytes, task %s)\n' "$FNM" "$FSZ" "$TASK_ID" >> "$SKIPPED_FILE"
     continue
   fi
   if [ -z "$URL" ]; then
-    # Some Teamwork responses expose a per-file download endpoint instead
-    URL="${BASE}/projects/api/v3/files/${FID}/download"
+    URL=$(curl -sS -u "$AUTH" -H "Accept: application/json" \
+      "${BASE}/projects/api/v3/files/${FID}.json" | jq -r '.file.downloadURL // empty')
   fi
-  curl -sS -L -u "$AUTH" -o "${ATTACH_DIR}/${FID}_${FNM}" "$URL" || \
-    echo "  ⚠ failed to download attachment '${FNM}'" >&2
-done < <(echo "$FILES_JSON" | jq -c '.files[]? // .data[]? // empty')
+  if [ -z "$URL" ]; then
+    echo "  ⚠ no download URL for attachment '${FNM}' (file ${FID}) — skipped" >&2
+    continue
+  fi
+  DL=$(curl -sS -L -u "$AUTH" -o "${ATTACH_DIR}/${FID}_${FNM}" -w '%{http_code}' "$URL")
+  [ "$DL" = "200" ] || echo "  ⚠ failed to download attachment '${FNM}' (HTTP ${DL})" >&2
+done < "$FILES_LIST"
 ```
 
-If neither endpoint shape returns a file list, log a single line warning and continue without attachments.
+If the list cannot be read, the `⚠` line says so and the task continues without attachments (never a silent "0 files").
 
 **Filename hint fall-through.** If the task description (or any fetched
 comment) mentions a filename or extension (regex from
@@ -1091,40 +1804,46 @@ worst outcome.
 
 ### Step 3.8 — Fetch comment attachments
 
-For each comment fetched in Step 3.5, iterate its `files` / `attachments` array and download to a `comments/` subdirectory inside `$ATTACH_DIR`:
+For each comment normalized in Step 3.5 (`$TW_JOB_DIR/comments_<taskId>.json`),
+download its `files[]` to a `comments/` subdirectory inside `$ATTACH_DIR`:
 
 ```bash
+# (run preamble — see Step 3)
+TASK_ID="<current task id>"
+ATTACH_DIR="./teamwork-task-${TASK_ID}"
+COMMENTS_FILE="$TW_JOB_DIR/comments_${TASK_ID}.json"
+SKIPPED_FILE="$TW_JOB_DIR/skipped_attachments.txt"
+MAX_BYTES=$(( $(jq -r '.max_attachment_size_mb // 25' "$CONFIG_FILE") * 1024 * 1024 ))
 mkdir -p "${ATTACH_DIR}/comments"
 
-# Same subshell trick as Step 3.7 — use process substitution so any accounting
-# variables (e.g. SKIPPED_ATTACHMENTS) updated inside the loop survive afterwards.
-while IFS= read -r CMT; do
-  [ -z "$CMT" ] && continue
-  CID=$(echo "$CMT" | jq -r '.id')
-  while IFS= read -r CF; do
-    [ -z "$CF" ] && continue
-    FID=$(echo "$CF" | jq -r '.id')
-    FNM=$(echo "$CF" | jq -r '.name // .displayName // ("file_" + (.id|tostring))')
-    FSZ=$(echo "$CF" | jq -r '.size // 0')
-    URL=$(echo "$CF" | jq -r '.downloadUrl // .downloadURL // empty')
-
-    if [ "${FSZ:-0}" -gt "$MAX_BYTES" ]; then
-      echo "  ⚠ skipped comment attachment '${FNM}' (${FSZ} bytes > ${MAX_BYTES})" >&2
-      SKIPPED_ATTACHMENTS+=("${FNM} (${FSZ} bytes, comment ${CID})")
-      continue
-    fi
-    [ -z "$URL" ] && URL="${BASE}/projects/api/v3/files/${FID}/download"
-    curl -sS -L -u "$AUTH" -o "${ATTACH_DIR}/comments/${CID}_${FID}_${FNM}" "$URL" \
-      || echo "  ⚠ failed to download comment attachment '${FNM}'" >&2
-  done < <(echo "$CMT" | jq -c '.files[]? // .attachments[]? // empty')
-done < <(echo "$COMMENTS_JSON" | jq -c '.comments[]? // empty')
+while IFS=$'\t' read -r CID FID FNM FSZ URL; do
+  [ -z "$FID" ] && continue
+  if [ "${FSZ:-0}" -gt "$MAX_BYTES" ]; then
+    echo "  ⚠ skipped comment attachment '${FNM}' (${FSZ} bytes > ${MAX_BYTES})" >&2
+    printf '%s (%s bytes, comment %s)\n' "$FNM" "$FSZ" "$CID" >> "$SKIPPED_FILE"
+    continue
+  fi
+  # v1-sourced comments carry no URL — resolve it from the v3 file record.
+  if [ -z "$URL" ]; then
+    URL=$(curl -sS -u "$AUTH" -H "Accept: application/json" \
+      "${BASE}/projects/api/v3/files/${FID}.json" | jq -r '.file.downloadURL // empty')
+  fi
+  if [ -z "$URL" ]; then
+    echo "  ⚠ no download URL for comment attachment '${FNM}' (file ${FID}) — skipped" >&2
+    continue
+  fi
+  DL=$(curl -sS -L -u "$AUTH" -o "${ATTACH_DIR}/comments/${CID}_${FID}_${FNM}" -w '%{http_code}' "$URL")
+  [ "$DL" = "200" ] || echo "  ⚠ failed to download comment attachment '${FNM}' (HTTP ${DL})" >&2
+done < <(jq -r '.[] | .id as $cid | .files[]?
+    | [($cid | tostring), (.id | tostring), (.name | gsub("/"; "_")), (.size | tostring), (.downloadURL // "")]
+    | @tsv' "$COMMENTS_FILE")
 ```
 
 Same size limit (`max_attachment_size_mb`) applies if `size` is present on the comment file entry.
 
 ### Step 3.9 — Fetch file comments
 
-If `config.fetch_file_comments == true`, for each file already collected in Step 3.7 fetch its comments and surface a short digest in the per-task plan context:
+If `config.fetch_file_comments == true`, for each file already collected in Step 3.7 (the ids in `$TW_JOB_DIR/files_<taskId>.tsv`) fetch its comments and surface a short digest in the per-task plan context:
 
 ```bash
 curl -sS -u "$AUTH" -H "Accept: application/json" \
@@ -1151,7 +1870,8 @@ This step runs **once per session** (not per task) when:
   was downloaded).
 
 ```bash
-LCD_ENABLED=$(jq -r '.local_context_discovery.enabled // true' "$CONFIG_FILE")
+# (run preamble — see Step 3)
+LCD_ENABLED=$(jq -r '.local_context_discovery.enabled | if . == null then true else . end' "$CONFIG_FILE")
 
 # Honour the fall-through from Step 3.7 even when explicitly disabled.
 if [ "$LCD_ENABLED" != "true" ] && [ "${FILENAME_HINT_PRESENT_ANY:-0}" != "1" ]; then
@@ -1161,11 +1881,14 @@ else
   MIN_SCORE=$(jq -r '.local_context_discovery.min_keyword_score // 1' "$CONFIG_FILE")
   MAX_OFFER=$(jq -r '.local_context_discovery.max_files_to_offer // 12' "$CONFIG_FILE")
 
-  # Keyword set: tasklist name + every task name + every filename hint from descriptions.
+  # Keyword set: tasklist name + every task name + every filename hint from
+  # descriptions — read from the task list Step 3 wrote.
+  TASKS_FILE="$TW_JOB_DIR/tasks.json"
+  [ -s "$TASKS_FILE" ] || echo "  ⚠ Step 3.10: ${TASKS_FILE} missing — keyword scoring will find nothing (run Step 3 first)" >&2
   KEYWORDS=$(jq -r '
-    [.tasklist.name, (.tasks[]?.name), (.tasks[]?.description // "")]
+    [(.tasklist.name // ""), (.tasks[]?.name // ""), (.tasks[]?.description // "")]
     | join(" ")
-  ' "$CLAUDE_JOB_DIR/tasks.json" 2>/dev/null \
+  ' "$TASKS_FILE" \
     | tr '[:upper:]' '[:lower:]' \
     | tr -dc '[:alnum:]áäčďéíľĺňóôŕšťúýž _\n' \
     | tr ' ' '\n' \
@@ -1173,12 +1896,16 @@ else
     | sort -u)
 
   # Build the find expression from configured extensions + filename hints.
-  EXTS=$(jq -r '.local_context_discovery.extensions[]' "$CONFIG_FILE")
-  HINTS=$(jq -r '.local_context_discovery.filename_hints[]' "$CONFIG_FILE")
-
+  # `while read` over the jq output — the 1.4.2 unquoted for-loop over the
+  # extension list iterated ONCE in zsh (no word splitting) and produced a
+  # single `-iname` term containing every extension, which matched nothing.
   FIND_EXTS=""
-  for E in $EXTS; do FIND_EXTS="$FIND_EXTS -iname '*.${E}' -o"; done
-  for H in $HINTS; do FIND_EXTS="$FIND_EXTS -iname '*${H}*' -o"; done
+  while IFS= read -r E; do
+    [ -n "$E" ] && FIND_EXTS="$FIND_EXTS -iname '*.${E}' -o"
+  done < <(jq -r '.local_context_discovery.extensions[]?' "$CONFIG_FILE")
+  while IFS= read -r H; do
+    [ -n "$H" ] && FIND_EXTS="$FIND_EXTS -iname '*${H}*' -o"
+  done < <(jq -r '.local_context_discovery.filename_hints[]?' "$CONFIG_FILE")
   FIND_EXTS="${FIND_EXTS% -o}"
 
   IGNORE_EXPR=""
@@ -1191,11 +1918,11 @@ else
     | sort -u)
 
   # Score each candidate by keyword overlap (filename + parent dir tokens ∩ KEYWORDS).
-  SCORED_FILE="$CLAUDE_JOB_DIR/local_discovery.tsv"
+  SCORED_FILE="$TW_JOB_DIR/local_discovery.tsv"
   : > "$SCORED_FILE"
   while IFS= read -r PATHCAND; do
     [ -z "$PATHCAND" ] && continue
-    TOKENS=$(echo "$PATHCAND" \
+    TOKENS=$(printf '%s\n' "$PATHCAND" \
       | tr '[:upper:]' '[:lower:]' \
       | tr -dc '[:alnum:]áäčďéíľĺňóôŕšťúýž /._\n' \
       | tr '/._' '\n' \
@@ -1278,25 +2005,31 @@ dropped ones if the user wants to see them via `--show-dropped`):
 
 ## Plan for tasklist "<name>" (<TF_COUNT_PROCESS> to implement, <TF_COUNT_ANALYSE> analyse-only, <TF_COUNT_DROP> dropped)
 
-> Tasklist filter (v1.3.0): implementing only tasks in the column
-> "<TF_TODO_NAME>" (<TODO_MATCH_MODE>) AND assigned to <USER_DISPLAY_NAME>.
-> Pass `--tasklist-filter=false` to process everything.
+> Tasklist filter: implementing only tasks in one of the start columns
+> <TF_TODO_LABEL, e.g. "Ready for Development" / "To Do"> (<TF_TODO_MATCH>)
+> AND assigned to <USER_DISPLAY_NAME>; tasks not on the board are
+> analyse-only. Pass `--tasklist-filter=false` to process everything.
+> <only when Step 3.3 found it, one line per project: "Project #X has none
+> of the start columns — none of its tasks can pass" | "Project #X has no
+> board — its tasks are analyse-only (not on the board)". A board that
+> lacks just some of the start columns needs no line.>
 
 ---
 
 ### To implement (<TF_COUNT_PROCESS>)
 
-#### 1. [#<task-id>] <title>  (est: <X> min, priority: <p>, stage: To Do, assignee: me)
+#### 1. [#<task-id>] <title>  (est: <X> min, priority: <p>, stage: <its start column from PROCESS_FILE, e.g. Ready for Development | To Do — or, single-task URL: its current column, "not on the board", "<column> — completed task, processing confirmed" (Step 3.35) | promoted: "<column or not on the board> — promoted">, assignee: me)
 **Parent context (v1.4.0):** <omitted if not a subtask, or if subtasks.include_parent_context=false | "Project bootstrap" — Container task for initial scaffolding; subtasks split the work by area (CI / auth / DB / …)>  ← from Step 3.42 PARENT_CTX_FILE
 **Goal (final summary):** <one-line summary from description below HR>
-**Acceptance:** <bullet list condensed from description above HR>
+**Acceptance:** <bullet list condensed from `acceptance_criteria` (Step 3.6)>
 **Approach:** <1-3 sentences — what files / modules will likely change, what tests, what risks>
-**Comments context:** <skipped (description sufficient) | 3 comments — user clarified to use X over Y on 2026-05-20>
+**Comments context:** <COMMENTS_STATE from Step 3.5 + digest — "none (0 comments)" | "newest of 8 read — full thread not fetched: 2026-05-20 client asks for X instead of Y" | "8 of 8 read — user clarified to use X over Y on 2026-05-20" | "not read (fetch_comments_mode=never)">
 **Attachments:** <none | 2 files: spec.md (3KB), mockup.png (180KB)>
 **File comments:** <skipped | 1 on mockup.png — "use #1A73E8 instead">
 **Context files (local):** <none | Strečnianska/DNR_Strecnianska_v1.2.docx, Strečnianska/Bmail o pohybe na ucte - vzor.docx>  ← from Step 3.10
 **Missing inputs:** <none | "Real Tatra banka notification sample" (BLOCKER — gating phrase in description) | "Final colour value" (SOFT — referenced in comment)>  ← from Step 3.10 (gap) + Step 6.0 patterns
-**Board target:** <In progress → Internal testing | In progress → Testing (fallback) | start only — no testing column | disabled — no workflow on this project>
+**Board target:** <In progress → Done - Local | In progress → Internal testing (fallback) | In progress → Testing (fallback) | start only — no done column | disabled — no workflow on this project>  ← `done_resolved_name` of the task's board (Step 3.3)
+**Quality dimensions (v1.5.0):** <which of ui_ux / performance / security / reachability / framework the planned change touches, one clause each — e.g. "reachability: new ExportLog screen → menu entry under Faktúry + tab on Invoice detail; security: policy per company; framework: Laravel 12.53 → `casts()` + enum cast for the status" | "backend only: performance, security, framework" | "skipped (--dimensions=none)">  ← refined in Step 6.2 (the framework clause names versions from the Step 6.2 detection, which is cached per run — running it while rendering this plan is free)
 
 #### 2. [#<task-id>] ...
 
@@ -1304,14 +2037,15 @@ dropped ones if the user wants to see them via `--show-dropped`):
 
 ### Analyse only — not implemented in this run (<TF_COUNT_ANALYSE>)
 
-> These tasks are in the tasklist but did not pass the v1.3.0 filter.
+> These tasks are in the tasklist but did not pass the filter (not in a
+> start column, not on the board, or assigned to someone else).
 > Listed here so you can sanity-check teammates' work, but the skill will
 > NOT touch them: no commits, no time logs, no board moves. To process any
 > of them anyway, pass `--tasklist-filter=false` or re-run with the single
 > task URL.
 
 #### 3. [#<task-id>] <title>  (stage: <stage>, assignee: <name>) ⏭ analyse-only
-**Why skipped:** wrong_stage(In progress) + wrong_assignee
+**Why skipped:** <wrong_stage(In Progress) + wrong_assignee | no_card — not on the board | stage_unresolved(300904) — column name could not be read>
 **Goal (final summary):** <one-line summary>
 **Quick read:** <1-2 sentence opinion / sanity check — "looks correctly scoped" / "watch out for X" / "approach mismatch with our backend convention" / "missing AC for offline behaviour">
 **Comments context:** <one-line digest if any non-trivial decisions in comments>
@@ -1345,14 +2079,14 @@ Then ask the user via **AskUserQuestion**:
 - **Skip some tasks** — user lists which task IDs to drop from "To implement", then re-render the plan and re-ask.
 - **Reorder** — user provides new order, re-render and re-ask.
 - **Add context to a task** — user picks a task and pastes extra context; append it to that task's working notes, re-render the plan, re-ask.
-- **Promote an analyse-only task to implement** — user picks one or more task IDs from the "Analyse only" section; the skill flips `process_mode` to `process` for those IDs only and re-renders the plan with them moved to the top section. Useful when the user happens to own a teammate's task ad-hoc.
+- **Promote an analyse-only task to implement** — user picks one or more task IDs from the "Analyse only" section; the skill flips `process_mode` to `process` for those IDs only and re-renders the plan with them moved to the top section. Useful when the user happens to own a teammate's task ad-hoc, or wants a task that is not on the board yet (`no_card`).
 - **Disable the tasklist filter for this run** — equivalent to `--tasklist-filter=false`: every fetched task becomes `process` regardless of stage/assignee. Re-renders the plan with everything in "To implement".
 - **Cancel** — abort the run, no commits, no time logs, no board moves.
 
 ### Step 4.0a — Empty-result short-circuit (v1.3.0)
 
 When `URL_KIND == "tasklist"` AND the tasklist filter produced
-`TF_COUNT_PROCESS == 0` (no tasks survived the "To Do" + me filter), the
+`TF_COUNT_PROCESS == 0` (no task survived the start-column + me filter), the
 normal plan-approval question above is **replaced** by a focused
 "nothing-to-implement" prompt. Step 3.45 has already printed the rule list
 + per-task reasons to stderr, so the user knows *why* the result is empty;
@@ -1364,10 +2098,10 @@ run* section (the *To implement* heading is omitted), preceded by:
 ```
 ## Plan for tasklist "<name>"
 
-⚠ The v1.3.0 tasklist filter found 0 tasks to implement.
+⚠ The tasklist filter found 0 tasks to implement.
 
-  Rules: column = "<TF_TODO_NAME>" (<TF_TODO_MATCH>), assignee = <USER_HINT>
-         analyze_all = <TF_ANALYZE_ALL>
+  Rules: start columns = <TF_TODO_LABEL> (<TF_TODO_MATCH>; not on the board = not implementable)
+         assignee = <USER_HINT>, analyze_all = <TF_ANALYZE_ALL>
 
   See the stderr output above for the per-task reason list, then pick one
   of the options below.
@@ -1383,17 +2117,18 @@ normal six:
 - **Pick tasks from the analyse-only list to implement** — multi-select
   the IDs to promote to `process`. Re-renders the plan + normal approval
   question.
-- **Change the required stage name** — free-text prompt for a new
-  `tasklist_filter.todo_stage` value (e.g. "Backlog", "Ready"). Re-runs
-  Step 3.45 with the new name, then re-renders. Does **not** persist the
-  change unless the user also opts to save it.
+- **Change the start columns** — free-text prompt for one or more column
+  names, comma-separated (e.g. `Backlog`, or `Ready for Development,To Do`).
+  Re-runs Step 3.45 with the value in its `TODO_STAGES_CLI` line, then
+  re-renders. Does **not** persist the change unless the user also opts to
+  save it (then it is written to `tasklist_filter.todo_stages`).
 - **Toggle the assignee check off** — equivalent to
   `--tasklist-only-mine=false`. Re-runs Step 3.45, then re-renders.
 - **Cancel** — abort the run.
 
 If the run had no analyse-only tasks either (somebody pointed at an
 empty tasklist), the prompt collapses to just *Disable the filter* /
-*Change the stage name* / *Cancel* — the *Pick tasks* and *Toggle
+*Change the start columns* / *Cancel* — the *Pick tasks* and *Toggle
 assignee check* options are hidden because they cannot help.
 
 The plan generation time is **not** logged to Teamwork — the per-task timer starts only inside the worker loop (Step 6.1).
@@ -1543,6 +2278,8 @@ The cursor's starting position depends on `time_cursor_strategy`:
 Initialize the cursor **once**, right before the worker loop starts (after plan approval — plan time is not billed):
 
 ```bash
+# (run preamble — see Step 3)
+USER_ID="<USER_ID from Step 2.7, empty if unresolved>"
 ROUND=$(jq -r '.time_rounding_minutes // 5' "$CONFIG_FILE")
 ROUND_SECS=$(( ROUND * 60 ))
 STRATEGY=$(jq -r '.time_cursor_strategy // "last_teamwork_timelog"' "$CONFIG_FILE")
@@ -1619,11 +2356,20 @@ case "$STRATEGY" in
 
     if [ -n "$USER_ID" ]; then
       # 2. Get most recent timelog of TODAY for that user
-      RESP=$(curl -sS -u "$AUTH" -H "Accept: application/json" \
+      RESP=$(curl -sS -u "$AUTH" -H "Accept: application/json" -w '\n%{http_code}' \
         "${BASE}/projects/api/v3/time.json?assignedToUserIds=${USER_ID}&pageSize=1&orderBy=date&orderMode=desc&startDate=${TODAY}")
+      HTTP=${RESP##*$'\n'}; RESP=${RESP%$'\n'*}
 
-      LAST_LOGGED=$(echo "$RESP" | jq -r '.timelogs[0].timeLogged // empty')
-      LAST_MIN=$(echo    "$RESP" | jq -r '.timelogs[0].minutes    // 0')
+      # Here-strings, not an echo pipe — zsh's echo mangles backslashes in
+      # timelog descriptions and jq then rejects the whole response.
+      LAST_LOGGED=""; LAST_MIN=0
+      if [ "$HTTP" != "200" ]; then
+        echo "  ⚠ GET /projects/api/v3/time.json → HTTP ${HTTP} — cursor falls back to floor(now)" >&2
+      elif ! LAST_LOGGED=$(jq -r '.timelogs[0].timeLogged // empty' <<<"$RESP") \
+         || ! LAST_MIN=$(jq -r '.timelogs[0].minutes // 0' <<<"$RESP"); then
+        echo "  ⚠ time.json response is not valid JSON — cursor falls back to floor(now)" >&2
+        LAST_LOGGED=""; LAST_MIN=0
+      fi
 
       if [ -n "$LAST_LOGGED" ]; then
         LAST_TS=$(parse_iso "$LAST_LOGGED")
@@ -1675,8 +2421,8 @@ order while staying inside the per-task worker loop (so it cannot be hoisted
 out to Step 5.x where there is no current task). If the task's
 `process_mode` (set in Step 3.45) is `analyse_only`, the worker loop skips
 **every** mutation for this task — no timer, no board move, no implementation,
-no commit, no time log, no attachment cleanup, no board move to *Internal
-testing*. The task's `Quick read` line from Step 4 is the entire on-screen
+no commit, no time log, no attachment cleanup, no board move to the done
+column. The task's `Quick read` line from Step 4 is the entire on-screen
 output; the loop continues with the next task.
 
 ```bash
@@ -1718,13 +2464,34 @@ Skip this step when `config.readiness_gate.enabled == false` or the user passed
 `--readiness-gate=false`.
 
 ```bash
-RG_ENABLED=$(jq -r '.readiness_gate.enabled // true' "$CONFIG_FILE")
+# (run preamble — see Step 3)
+TASK_ID="<current task id>"
+RG_ENABLED=$(jq -r '.readiness_gate.enabled | if . == null then true else . end' "$CONFIG_FILE")
 [ "$RG_ENABLED" != "true" ] && { echo "  ℹ readiness gate disabled — skipping"; }
 
 if [ "$RG_ENABLED" = "true" ]; then
+  # The description comes from Step 3's task list; a subtask added by
+  # Step 3.42 is not in it, so fetch that one directly. Shell variables from
+  # earlier steps do not survive into this Bash call.
+  TASK_DESCRIPTION_TEXT=$(jq -r --arg id "$TASK_ID" \
+    '.tasks[] | select((.id | tostring) == $id) | .description // ""' "$TW_JOB_DIR/tasks.json")
+  if [ -z "$TASK_DESCRIPTION_TEXT" ]; then
+    TASK_DESCRIPTION_TEXT=$(curl -sS -u "$AUTH" -H "Accept: application/json" \
+      "${BASE}/projects/api/v3/tasks/${TASK_ID}.json" | jq -r '.task.description // ""')
+    [ -z "$TASK_DESCRIPTION_TEXT" ] && echo "  ⚠ [#${TASK_ID}] description empty or GET /projects/api/v3/tasks/${TASK_ID}.json failed — the readiness gate scans the comments only" >&2
+  fi
+  TASK_DESCRIPTION_TEXT=$(printf '%s\n' "$TASK_DESCRIPTION_TEXT" | sed -E 's/<[^>]+>/ /g')
+  # ACCEPTANCE_CRITERIA_TEXT / FINAL_SUMMARY_TEXT: the Step 3.6 split, if you
+  # have it at hand — both are substrings of the description, so leaving them
+  # empty loses nothing.
+
+  # Every comment read in Step 3.5 (chronological, plain text).
+  COMMENTS_CONCAT_TEXT=$(jq -r '.[] | if (.body // "") != "" then .body
+      else ((.htmlBody // "") | gsub("<[^>]+>"; " ")) end' "$TW_JOB_DIR/comments_${TASK_ID}.json")
+
   # Build one big haystack: task description + acceptance_criteria + final_summary
   # + every comment body, lowercased and HTML-stripped.
-  HAYSTACK=$(printf '%s\n%s\n%s\n' \
+  HAYSTACK=$(printf '%s\n%s\n%s\n%s\n' \
     "$TASK_DESCRIPTION_TEXT" \
     "$ACCEPTANCE_CRITERIA_TEXT" \
     "$FINAL_SUMMARY_TEXT" \
@@ -1736,7 +2503,8 @@ if [ "$RG_ENABLED" = "true" ]; then
   while IFS= read -r PAT; do
     [ -z "$PAT" ] && continue
     # `grep -E` with the configured POSIX-ERE pattern; first match wins.
-    if MATCH=$(echo "$HAYSTACK" | grep -oE "$PAT" | head -n1); then
+    # printf, not echo — zsh's echo would expand backslashes in task text.
+    if MATCH=$(printf '%s\n' "$HAYSTACK" | grep -oE "$PAT" | head -n1); then
       if [ -n "$MATCH" ]; then
         GATING_HIT=1
         MATCHED_PHRASE="$MATCH"
@@ -1749,7 +2517,8 @@ if [ "$RG_ENABLED" = "true" ]; then
     # Re-use the local discovery results (Step 3.10) to offer specific files
     # as candidate inputs. If discovery is empty for this task, just ask
     # whether the user has the input as free text.
-    OFFERED=$(awk -F '\t' '{print }' "$CLAUDE_JOB_DIR/local_discovery.tsv.top" 2>/dev/null)
+    OFFERED=""
+    [ -s "$TW_JOB_DIR/local_discovery.tsv.top" ] && OFFERED=$(cat "$TW_JOB_DIR/local_discovery.tsv.top")
     : # render AskUserQuestion (see options below)
   fi
 fi
@@ -1819,16 +2588,33 @@ TIMELOG_OK=0
 COMMIT_HASH=""
 ```
 
-If `plan_mode == per_task`, do **not** start the timer here yet — first render a per-task plan (same shape as the overview entry: Goal / Acceptance / Approach / Comments context / Attachments / Board target) and ask the user via **AskUserQuestion** to **Approve / Skip / Add context / Cancel run**. Only **after** approval start the timer.
+If `plan_mode == per_task`, do **not** start the timer here yet — first render a per-task plan (same shape as the overview entry: Goal / Acceptance / Approach / Comments context / Attachments / Board target / Quality dimensions) and ask the user via **AskUserQuestion** to **Approve / Skip / Add context / Cancel run**. Only **after** approval start the timer.
 
 ### 6.1.5 Move task to "In progress" on the board
 
 Immediately after the timer starts (and after per-task approval, if applicable), nudge the card to the in-progress column:
 
 ```bash
-BW_ENABLED=$(jq -r '.board_workflow.enabled // true' "$CONFIG_FILE")
+# (run preamble — see Step 3)
+TASK_ID="<current task id>"
+# Project id of THIS task (subtasks included) and the board state Step 3.3
+# resolved for it — read from files, because no variable survives between
+# Bash calls (the 1.4.2 per-project array lookup was empty in every fresh
+# shell, and PROJECT_ID itself was null — see Step 3).
+PROJECT_ID=$(awk -F '\t' -v id="$TASK_ID" '$1 == id { print $2; exit }' "$TW_JOB_DIR/task_projects.tsv" 2>/dev/null)
+BOARD_FILE="$TW_JOB_DIR/board_${PROJECT_ID}.tsv"
+WORKFLOW_ID=""; IN_PROGRESS_STAGE_ID=""; BOARD_DISABLED=1
+if [ -n "$PROJECT_ID" ] && [ -s "$BOARD_FILE" ]; then
+  WORKFLOW_ID=$(awk -F '\t'          '$1 == "workflow_id"          { print $2; exit }' "$BOARD_FILE")
+  IN_PROGRESS_STAGE_ID=$(awk -F '\t' '$1 == "in_progress_stage_id" { print $2; exit }' "$BOARD_FILE")
+  BOARD_DISABLED=$(awk -F '\t'       '$1 == "disabled"             { print $2; exit }' "$BOARD_FILE")
+else
+  echo "  ⚠ [#${TASK_ID}] no project id / no Step 3.3 board state (project '${PROJECT_ID}') — board move to 'In progress' skipped" >&2
+fi
+
+BW_ENABLED=$(jq -r '.board_workflow.enabled | if . == null then true else . end' "$CONFIG_FILE")
 if [ "$BW_ENABLED" = "true" ] \
-   && [ -z "${BOARD_MOVE_DISABLED[$PROJECT_ID]}" ] \
+   && [ "$BOARD_DISABLED" != "1" ] \
    && [ -n "$WORKFLOW_ID" ] && [ -n "$IN_PROGRESS_STAGE_ID" ]; then
   HTTP=$(curl -sS -o /dev/null -w "%{http_code}" -u "$AUTH" \
     -H "Content-Type: application/json" -H "Accept: application/json" \
@@ -1848,11 +2634,206 @@ Failure here is **non-fatal** — the task itself still runs, and the final summ
 
 Re-read the task description (already split into `acceptance_criteria` + `final_summary` in Step 3.6), any fetched comments (Step 3.5), and any text-based files in `$ATTACH_DIR` and `$ATTACH_DIR/comments/`. Use `Read` to inline text files (`.md`, `.txt`, `.json`, `.yaml`, `.yml`, `.csv`, `.log`, `.html`, `.xml`, source files etc.). Binary attachments (images, PDFs, archives) are listed in the plan but not opened.
 
-The `final_summary` (below HR) is the authoritative goal; use `acceptance_criteria` (above HR) as the checklist to verify before committing. The **last comment** in chronological order is the freshest source of truth when comments contradict each other.
+The `final_summary` (Step 3.6) is the authoritative goal; use `acceptance_criteria` (Step 3.6 — the `## Akceptačné kritériá` block in the canonical format, otherwise the text above the first HR) as the checklist to verify before committing. The **last comment** in chronological order is the freshest source of truth when comments contradict each other.
 
 If anything is genuinely ambiguous (missing acceptance criteria, conflicting requirements with comments, business decision needed) → **AskUserQuestion** with a focused question. Wait for the answer before proceeding. Do **not** guess on business-shaped questions.
 
 For purely technical decisions where there is a reasonable default consistent with the codebase, proceed without asking.
+
+**Build-time quality dimensions (v1.5.0).** Before writing code, decide which
+of the five cross-cutting dimensions this task's change touches and plan the
+concrete step for each one that applies. The keys are exactly the ones
+`/teamwork-task-test` reviews at QA time (its Step 6.6) — building with them
+in mind is cheaper than having QA find the gap after the commit. The active
+set is `config.build_quality.dimensions` (default all five) or the
+`--dimensions=` override; `none` / `[]` skips this block and Step 6.5.5, and
+the final summary says `skipped (--dimensions=none)`.
+
+Decide from the **shape of the planned change**, not from the task's wording —
+but a `### Prierezové požiadavky` / `### Cross-cutting requirements` block in the
+acceptance criteria (Step 3.6) is binding: each item there is an acceptance
+criterion, its dimension applies, and the menu section, roles and parent screen
+it names win over your own inference. `framework` never appears in that block
+(the sibling plugins put it in the *Technický popis* only, because QA treats it
+as advisory); a framework note there is guidance — when it names a version or
+an API that disagrees with the detected versions below, the detected versions
+win and the plan says so.
+
+| Key | Applies when the change … | What to plan |
+| --- | --- | --- |
+| `ui_ux` | touches a file matching `config.test_visual_file_patterns` (templates, components, views) or a class that feeds one (Nova fields / actions / cards, messages shown to the user) | the sibling screen whose patterns you copy; accessible names and labels; loading / empty / error states; every new string → which module lang file + English key |
+| `performance` | adds or changes a query, a migration, a loop over records, a batch / job, an import / export | eager loads, pagination, `chunkById`, indexes on new foreign keys and filtered / sorted columns, the row count at which the chosen approach would start to hurt |
+| `security` | adds a route, controller action, Nova action / button, API endpoint, form input, upload, or a raw query | the gate the neighbours use + the object-scoped policy check, FormRequest validation, `$fillable`, tenant / company scope |
+| `reachability` | adds, renames or removes a screen — a page, a route rendering a view, a Nova resource / lens / dashboard / tool, an SPA route | the **menu entry** (which menu, which roles) **and the inbound links** from the related screens (relation field or tab on the parent, link on a detail view, action button, breadcrumb) — planned into the **same commit** as the screen |
+| `framework` | writes or changes code in a language / framework the project pins a version of — PHP, Laravel, Nova, Livewire, Inertia, Pest, JS / TS, Vue, React, CSS, Tailwind (almost every code task; `not_applicable` for docs / config / data-only changes) | the **installed** versions that bound the change (the cached table below), the current idiom or built-in feature the new code will use instead of a dated or hand-rolled pattern, and the docs page it comes from when the choice is not obvious — inside the Step 6.3 guardrails (project conventions win, no drive-by rewrites) |
+
+A dimension the change does not touch is recorded as `not_applicable(<why>)`
+— a pure backend task without UI must not grow UI boilerplate. Add the result
+to the per-task internal plan, one line per active key:
+
+```
+Build quality (v1.5.0):
+  - ui_ux:        applies — new Nova resource ExportLog; labels via lang/sk/export.php, empty state on index
+  - performance:  applies — index on export_logs.invoice_id; eager-load invoice.customer on the index
+  - security:     applies — ExportLogPolicy::view scoped to the user's company; action behind the same gate as InvoiceActions
+  - reachability: applies — menu entry under "Faktúry" (roles admin, accountant) + HasMany tab on the Invoice detail, same commit
+  - framework:    applies — Laravel 12.53 / PHP ^8.4 / Nova 5.7: `casts()` + enum cast for ExportLog::status, `Rule::enum` in the FormRequest, `->filterable()` on the Nova status field (docs: eloquent-mutators#enum-casting)
+```
+
+**Framework versions — detected once per run, never assumed (v1.5.0).** The
+`framework` dimension is only as good as the versions that bound it, and model
+memory is stale. The first task that plans with `framework` active runs the
+snippet below: it reads the project's lock / manifest files and writes
+`$TW_JOB_DIR/framework_versions.tsv` (`name<TAB>version<TAB>source`, `-` when
+unknown); every later task of the run reuses that file, and the Step 3 reset
+gives the next run a fresh detection. A task whose commit changes
+`composer.json` / `composer.lock`, a `package.json` or a JS lock file (an
+upgrade, a new package) deletes the file right after its commit
+(`rm -f "$TW_JOB_DIR/framework_versions.tsv"`), so the next task detects
+again instead of planning against the old versions. PHP packages come from
+`composer.lock` (`laravel/framework`, `laravel/nova`, `livewire/livewire`,
+`inertiajs/inertia-laravel`, `pestphp/pest`, `laravel/boost`) plus the PHP
+constraint (`require.php`, `config.platform.php`); JS packages (`vue`, `react`,
+`nuxt`, `vite`, `typescript`, `tailwindcss`, `@inertiajs/*`, `@ionic/*`) from
+`node_modules`, then `package-lock.json`, then `yarn.lock`, then the declared
+range; plus the `browserslist` target and the Node version (`.nvmrc` /
+`.node-version` / `engines.node`).
+
+```bash
+# (run preamble — see Step 3)
+FW_FILE="$TW_JOB_DIR/framework_versions.tsv"
+if [ -s "$FW_FILE" ]; then
+  echo "  ℹ framework versions: reusing the table detected earlier in this run" >&2
+else
+  ROOT=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
+  : > "$FW_FILE.tmp"
+
+  # PHP side — the app's composer.lock: repo root first, else one level down
+  # (never vendor/ or a module package, which has no lock of its own).
+  CL=""; [ -f "$ROOT/composer.lock" ] && CL="$ROOT/composer.lock"
+  [ -z "$CL" ] && CL=$(find "$ROOT" -mindepth 2 -maxdepth 2 -name composer.lock \
+    -not -path '*/vendor/*' -not -path '*/node_modules/*' 2>/dev/null | head -n1)
+  CJ="$ROOT/composer.json"; [ -n "$CL" ] && CJ="$(dirname "$CL")/composer.json"
+  PHP_PKGS='^(laravel/(framework|nova|boost)|livewire/livewire|inertiajs/inertia-laravel|pestphp/pest)$'
+  PHP_ROWS=""
+  if [ -n "$CL" ]; then
+    PHP_ROWS=$(jq -r --arg re "$PHP_PKGS" --arg src "${CL#"$ROOT"/}" \
+      '[(.packages // [])[], (.["packages-dev"] // [])[]] | .[]
+       | select(.name | test($re)) | [.name, .version, $src] | @tsv' "$CL") \
+      || { PHP_ROWS=""; echo "  ⚠ ${CL#"$ROOT"/} is not valid JSON — PHP package versions fall back to the composer.json constraints" >&2; }
+  fi
+  if [ -f "$CJ" ]; then
+    # No usable lock → the declared constraints are the best bound (the source column says so).
+    [ -z "$PHP_ROWS" ] && PHP_ROWS=$(jq -r --arg re "$PHP_PKGS" --arg src "${CJ#"$ROOT"/} (constraint, no lock)" \
+      '((.require // {}) + (.["require-dev"] // {})) | to_entries[]
+       | select(.key | test($re)) | [.key, .value, $src] | @tsv' "$CJ")
+    PHP_ROWS=$(printf '%s\n' "$PHP_ROWS"; jq -r --arg src "${CJ#"$ROOT"/}" \
+      '(.require.php // empty | ["php", ., ($src + " require.php")]),
+       (.config.platform.php // empty | ["php_platform", ., ($src + " config.platform.php")])
+       | @tsv' "$CJ") \
+      || echo "  ⚠ ${CJ#"$ROOT"/} is not valid JSON — PHP version constraint unknown" >&2
+  fi
+  printf '%s\n' "$PHP_ROWS" | grep -v '^$' >> "$FW_FILE.tmp"
+
+  # JS side — the app's package.json (root first, else one level down).
+  PJ=""; [ -f "$ROOT/package.json" ] && PJ="$ROOT/package.json"
+  [ -z "$PJ" ] && PJ=$(find "$ROOT" -mindepth 2 -maxdepth 2 -name package.json \
+    -not -path '*/node_modules/*' -not -path '*/vendor/*' 2>/dev/null | head -n1)
+  if [ -n "$PJ" ]; then
+    PD=$(dirname "$PJ"); PFX=""; [ "$PD" != "$ROOT" ] && PFX="${PD#"$ROOT"/}/"
+    NAMES=$(jq -r '((.dependencies // {}) + (.devDependencies // {})) | keys[]
+        | select(test("^(vue|react|nuxt|vite|typescript|tailwindcss|@inertiajs/.+|@ionic/.+)$"))' "$PJ") \
+      || echo "  ⚠ ${PFX}package.json is not valid JSON — JS package versions unknown" >&2
+    while IFS= read -r N; do
+      [ -z "$N" ] && continue
+      V=""; SRC=""
+      if [ -f "$PD/node_modules/$N/package.json" ]; then
+        V=$(jq -r '.version // empty' "$PD/node_modules/$N/package.json"); SRC="${PFX}node_modules"
+      fi
+      if [ -z "$V" ] && [ -f "$PD/package-lock.json" ]; then
+        V=$(jq -r --arg n "$N" '.packages["node_modules/" + $n].version // .dependencies[$n].version // empty' \
+          "$PD/package-lock.json"); SRC="${PFX}package-lock.json"
+      fi
+      if [ -z "$V" ] && [ -f "$PD/yarn.lock" ]; then
+        V=$(awk -v p="$N" 'index($0, p "@") == 1 || index($0, "\"" p "@") == 1 { f = 1; next }
+                           f && $1 ~ /^version:?$/ { gsub(/[":]/, "", $2); print $2; exit }' "$PD/yarn.lock")
+        SRC="${PFX}yarn.lock"
+      fi
+      if [ -z "$V" ]; then   # pnpm / bun without node_modules: the declared range only
+        V=$(jq -r --arg n "$N" '(.dependencies // {})[$n] // (.devDependencies // {})[$n] // empty' "$PJ")
+        SRC="${PFX}package.json (range, not installed)"
+      fi
+      printf '%s\t%s\t%s\n' "$N" "${V:--}" "$SRC" >> "$FW_FILE.tmp"
+    done <<<"$NAMES"
+
+    # Browser target for CSS / JS features, and the Node version.
+    BL=""; BLSRC=""
+    for F in .browserslistrc browserslist; do
+      if [ -z "$BL" ] && [ -f "$PD/$F" ]; then
+        BL=$(grep -v -e '^[[:space:]]*#' -e '^[[:space:]]*$' "$PD/$F" | paste -sd ',' - | sed 's/,/, /g')
+        BLSRC="${PFX}${F}"
+      fi
+    done
+    if [ -z "$BL" ]; then
+      BL=$(jq -r '.browserslist // empty
+          | if type == "array" then join(", ")
+            elif type == "object" then (.production // .defaults // ([.[]] | flatten)) | join(", ")
+            else tostring end' "$PJ")
+      BLSRC="${PFX}package.json browserslist"
+    fi
+    [ -z "$BL" ] && { BL="-"; BLSRC="not set — the bundler's default build target applies (check its docs)"; }
+    printf '%s\t%s\t%s\n' "browserslist" "$BL" "$BLSRC" >> "$FW_FILE.tmp"
+
+    NODE=""; NSRC=""
+    for F in .nvmrc .node-version; do
+      if [ -z "$NODE" ] && [ -f "$PD/$F" ]; then
+        NODE=$(head -n1 "$PD/$F" | tr -d '[:space:]'); NSRC="${PFX}${F}"
+      fi
+    done
+    [ -z "$NODE" ] && { NODE=$(jq -r '.engines.node // empty' "$PJ"); NSRC="${PFX}package.json engines.node"; }
+    [ -n "$NODE" ] && printf '%s\t%s\t%s\n' "node" "$NODE" "$NSRC" >> "$FW_FILE.tmp"
+  fi
+
+  [ -s "$FW_FILE.tmp" ] || printf '%s\t%s\t%s\n' "none" "-" "no composer.lock / composer.json / package.json found" > "$FW_FILE.tmp"
+  mv "$FW_FILE.tmp" "$FW_FILE"
+fi
+awk -F '\t' '{ printf "  %-28s %-24s %s\n", $1, $2, $3 }' "$FW_FILE"
+```
+
+How to read the table:
+
+- **An installed version beats a constraint.** Rows from `composer.lock`,
+  `node_modules`, `package-lock.json` or `yarn.lock` are what runs; a
+  `(constraint, no lock)` / `(range, not installed)` row is only a bound —
+  plan against the lowest version it admits.
+- **PHP language features are bounded by the lowest PHP the project admits,
+  not by your local `php -v`:** `php_platform` when set, otherwise the floor
+  of `require.php` (`^8.2` → 8.2: no typed class constants from 8.3, no
+  property hooks from 8.4).
+- **CSS / JS features are bounded by `browserslist`.** When it is not set,
+  the bundler's default build target applies — look it up for the installed
+  bundler version instead of assuming one; a Tailwind v3 → v4 decision is a
+  browser-target decision too.
+- **Laravel Boost** (a `laravel/boost` row, and its MCP tools in this
+  session): its `application-info` tool reports the versions directly — use it
+  to cross-check; the file stays the record the later steps read.
+- A missing row is not a missing package: pnpm / bun projects without
+  `node_modules` only report the declared range, and a Nova custom component
+  under `nova-components/` carries its own `package.json` — read that one
+  when the task touches it. In a repository with several apps and nothing at
+  the root (e.g. `backend/` + `frontend/`), only the first manifest found one
+  level down is read — the source column names it; read the other app's
+  manifest the same way when the task touches that app.
+
+**Look the API up in current docs, not in memory.** For every framework the
+task touches: once per run and major version, skim that major's upgrade guide
+/ release notes (what is new, what is deprecated); per task, look up the
+specific API before using it whenever the idiom is not obvious. Source order:
+Laravel Boost `search-docs` when the project has `laravel/boost` (it answers
+for the installed versions), otherwise the context7 MCP (`resolve-library-id`
+→ `query-docs`, naming the installed version), otherwise the official docs via
+`WebFetch`. Name the page in the plan line (and in the Step 6.5.5 detail) when
+the choice was non-obvious.
 
 ### 6.2.5 Test strategy — propose tests when none are specified
 
@@ -1964,6 +2945,66 @@ this block before the timer starts.
 - Use `Read`, `Edit`, `Write`, `Bash`, `Grep`, `Glob` as needed.
 - Respect any project conventions found in `CLAUDE.md` at the repo root.
 - Write all code comments in **English**.
+- **Build-time quality rules (v1.5.0)** — follow the rules of every dimension
+  Step 6.2 marked *applies* (and only those):
+  - **`ui_ux`** — copy the sibling screen's patterns. Give every interactive
+    element an accessible name; a disabled control gets `aria-disabled` (or a
+    real `disabled`) **and** a visible reason (`title` / `aria-describedby`).
+    Label form controls, give images `alt`, never convey state by colour
+    alone. Design the loading / empty / error states, confirm destructive
+    actions, avoid layout shift. Every user-facing string goes through the
+    translation layer with an English key in the module's own lang file, and
+    the new key must resolve to text — no dotted-prefix collision with an
+    existing string key (hints under `hint.<thing>`, not `<thing>.hint`).
+  - **`performance`** — no query inside a loop; eager-load the relations a
+    row touches. Paginate lists; `chunkById` batches and data migrations.
+    Index new foreign keys and filtered / sorted columns (check for an
+    existing index first). Filter in SQL, not in PHP. Move slow work to a
+    queue. Cache only with an invalidation story.
+  - **`security`** — put every new route / action / button / endpoint behind
+    the same gate as its neighbours **plus** an object-scoped policy check (a
+    role check any tenant passes is an IDOR). Never bypass the tenant /
+    company scope with raw `DB::` calls or joins. Validate through a
+    FormRequest, keep `$fillable` explicit, never `fill($request->all())`, never
+    interpolate into raw SQL or a shell. Crafted input gets a handled answer
+    (validation error / flash message) — never an unhandled 500, never
+    internals in the message (with `APP_DEBUG=false` a thrown message becomes
+    a generic 500). No secrets in code, logs or commits. Hiding a menu item is
+    not access control.
+  - **`reachability`** — a new screen ships **in the same commit** with its
+    menu entry (visible to the intended roles) **and** the inbound links from
+    the related screens where a user would look for it. A child resource
+    reached through its parent's relation tab counts as reachable. A
+    deliberately URL-only page (e-mail deep link, landing page) is named as
+    such in the commit body and recorded in Step 6.5.5 as an `allow_orphans`
+    candidate for QA. Renaming or removing a screen updates or removes every
+    menu entry and inbound link that pointed at it. Menu visibility and route
+    authorization must agree — visible-but-403 and hidden-but-open are both
+    defects.
+  - **`framework`** — write the **new or changed** code in the current idiom
+    of the versions the project has installed (the Step 6.2 table), looked up
+    in current docs — not in patterns remembered from older versions. Prefer
+    the framework's built-in feature over hand-rolled code; examples, each
+    only when the installed version has it: PHP enums with methods, readonly
+    properties / classes, first-class callables, `#[\Override]`; Laravel
+    `casts()` + enum casts, `Attribute` accessors, `Rule::enum`,
+    `chunkById` / `lazyById`, `whereAny` / `whereAll`, `Http::retry` / pool,
+    `once()`, `Str` / `Number` helpers, scoped route model binding; Nova
+    `dependsOn()`, `->filterable()`, `Badge` fields, `Nova::mainMenu()`; Vue
+    `<script setup>` + `defineModel` / `useTemplateRef`, composables instead
+    of mixins; JS optional chaining, `structuredClone`, `Intl.*`,
+    `AbortController`; CSS custom properties, `:has()`, container queries,
+    logical properties, `clamp()`; Tailwind v4 CSS-first config (`@theme`,
+    `@utility`) in a v4 project, `tailwind.config.js` idioms only in a v3 one.
+    **Guardrails — consistency beats novelty:** the project's `CLAUDE.md` and
+    the sibling code's conventions win over a newer idiom; do not add a second
+    pattern next to an established one unless the task *is* the refactor (then
+    migrate consistently); **no drive-by rewrites** of code the task does not
+    otherwise touch — record the opportunity as a Step 6.5.5 `suggest` row
+    instead; never use an API deprecated in the installed version; never use a
+    feature newer than the installed version, the PHP floor or the
+    browserslist target (it will not run); no new dependency for something
+    the framework already ships.
 - **Implement the auto-proposed tests from Step 6.2.5 in the same task**, so
   the commit + time log cover both the feature and its verification. Place
   files where the framework conventionally lives (`tests/Feature/…`,
@@ -1978,6 +3019,99 @@ If the project has a test suite and the change is testable:
 
 ### 6.5 Format
 If PHP files changed: `vendor/bin/pint --dirty --format agent`.
+
+### 6.5.5 Quality self-check (v1.5.0)
+
+Before the timer stops, walk **this task's own diff** against the active
+dimensions from Step 6.2 — the same five keys `/teamwork-task-test` audits in
+its Step 6.6, so a gap found here costs minutes instead of a QA round trip.
+Skip the step (status `skipped(--dimensions)` for every key) when the active
+set is empty.
+
+```bash
+# (run preamble — see Step 3)
+TASK_ID="<current task id>"
+# Everything this task changed: tracked edits + new untracked files.
+CHANGED=$( { git diff HEAD --name-only; git ls-files --others --exclude-standard; } | sort -u | grep -v '^$')
+printf '%s\n' "$CHANGED"
+```
+
+For **every** active key record exactly one status:
+
+- `checked` — you read the relevant hunks against the Step 6.3 rules and
+  nothing is left open (including things you just fixed).
+- `not_applicable(<why>)` — the diff does not touch it (e.g. `no UI files in
+  diff`, `no new screen`).
+- `skipped(--dimensions)` — excluded by config or flag.
+- `open(<item> @ <file:line>)` — a finding you are not fixing in this task
+  (too big, needs a business decision, pre-existing code the task walked
+  past). One row per item.
+- `suggest(<opportunity> @ <file:line>)` — **`framework` only**, in addition
+  to its status row: a modernisation opportunity in code this task read but
+  did not otherwise change, which the no-drive-by guardrail kept out of the
+  diff. Advisory — never a defect, never gates, never counts as open. Only
+  with a concrete replacement the installed version supports; at most three
+  per task. Something in that code that is a defect under another key (an
+  N+1, an unbounded `all()` walked in PHP, a missing policy check, an
+  orphaned screen) is an `open` row under **that** key, never a `framework`
+  tip — the advisory label must not hide a finding QA is owed.
+
+**Fix what is cheap now** — a missing label or `alt`, an N+1 you can close
+with one `with()`, a missing policy call, a missing menu entry or relation
+tab, a deprecated call in a line you wrote. The fix belongs to this task and
+lands in its commit (Step 6.7).
+
+For **`framework`**, ask of the new and changed lines only:
+- Does anything use an API **deprecated** in the installed version, or a
+  pattern the installed version **replaced** (e.g. a `$casts` property where
+  the siblings already use `casts()`, a mixin where the project uses
+  composables)?
+- Does anything **hand-roll** what the framework already ships (a manual
+  `foreach` + `->save()` batch instead of `chunkById`, string-built number /
+  date formatting instead of `Number` / `Intl`, a new package for a built-in)?
+- Does anything need a version **newer** than the installed one, the PHP
+  floor or the browserslist target? That is a bug, not a style note — it will
+  not run. Fix it now; it is never left `open` or `suggest`.
+- Did a newer idiom break the sibling convention? Then the convention wins —
+  revert to it and note why in the detail.
+- For every non-obvious choice, name the version and the docs page in the
+  `checked` detail (e.g. `Laravel 12.53: casts() + enum cast — docs
+  eloquent-mutators#enum-casting`).
+
+Record every status in `$TW_JOB_DIR/build_quality.tsv`
+(`taskId<TAB>dimension<TAB>status<TAB>detail`, detail `-` when there is
+none) — Step 6.6.5, Step 7 and Step 8 read it. The **status column holds the
+bare keyword** — `checked`, `not_applicable`, `skipped`, `open` or `suggest`
+— and the parenthesised part above goes into the detail column
+(`--dimensions` for `skipped`, `<item> @ <file:line>` for `open`,
+`<opportunity> @ <file:line>` for `suggest`): the Step 6.6.5 gate matches
+`open` exactly, so `open(…)` in the status column would slip past it.
+
+```bash
+# (run preamble — see Step 3; this is a new Bash call)
+TASK_ID="<current task id>"
+QUALITY_FILE="$TW_JOB_DIR/build_quality.tsv"
+printf '%s\t%s\t%s\t%s\n' "$TASK_ID" "ui_ux"        "checked"        "-"                              >> "$QUALITY_FILE"
+printf '%s\t%s\t%s\t%s\n' "$TASK_ID" "performance"  "not_applicable" "no queries or migrations in diff" >> "$QUALITY_FILE"
+printf '%s\t%s\t%s\t%s\n' "$TASK_ID" "reachability" "open" \
+  "ExportLog is URL-only by design (e-mail deep link) → allow_orphans candidate @ app/Nova/ExportLog.php" >> "$QUALITY_FILE"
+printf '%s\t%s\t%s\t%s\n' "$TASK_ID" "framework"    "checked" \
+  "Laravel 12.53: casts() + enum cast for ExportLog::status — docs eloquent-mutators#enum-casting" >> "$QUALITY_FILE"
+printf '%s\t%s\t%s\t%s\n' "$TASK_ID" "framework"    "suggest" \
+  "number_format(\$total, 2, ',', ' ') . ' €' → Number::currency(\$total, 'EUR', 'sk') (untouched helper, Laravel 12.53) @ app/Support/InvoiceFormatter.php:31" >> "$QUALITY_FILE"
+```
+
+Hard rules:
+- **Never block silently.** An `open` item never aborts the task and is never
+  dropped — Step 7 prints it per task and Step 8 hands it to
+  `/teamwork-task-test`. An open `security` or `reachability` item also makes
+  the Step 6.6.5 safety gate ask before committing (in the default
+  `auto_commit_mode=when_safe`; `always` never asks, `never` always does).
+  `framework` rows never make the gate ask — an `open` one is listed like any
+  other, a `suggest` one only as an advisory note.
+- **Never claim a dimension was checked when it was not.** If the diff was too
+  large to read, or you ran out of room, the status is
+  `open(not reviewed — <reason>)`, not `checked`.
 
 ### 6.6 Stop timer + decide minutes
 
@@ -2126,7 +3260,7 @@ fi
 
 Why this matters: without the guard, a fast run will silently produce timesheet entries with start/end times that have not happened yet. The PM reads "16:00 — refactor done" at 13:30 and rightly asks how that is possible.
 
-`TIMELOG_SKIPPED=1` plumbs through Step 6.8 — the POST is skipped, the cursor is **not** advanced, and Step 6.8.5 (board move to *Internal testing*) is **also** skipped because the task is not yet considered finished from a billing standpoint. `TIMELOG_SUB_ROUND=1` does NOT skip — the log goes through normally; only the duration is below `ROUND` (or is not a clean multiple of `ROUND`), and Step 7 surfaces `SUB_ROUND_TIMELOGS` alongside the skipped/clamped lists so the user knows which entries broke the 5-min cosmetic alignment and why (`elapsed below threshold` vs `clamped by headroom guard`).
+`TIMELOG_SKIPPED=1` plumbs through Step 6.8 — the POST is skipped, the cursor is **not** advanced, and Step 6.8.5 (board move to the done column — *Done - Local* or its fallback) is **also** skipped because the task is not yet considered finished from a billing standpoint. `TIMELOG_SUB_ROUND=1` does NOT skip — the log goes through normally; only the duration is below `ROUND` (or is not a clean multiple of `ROUND`), and Step 7 surfaces `SUB_ROUND_TIMELOGS` alongside the skipped/clamped lists so the user knows which entries broke the 5-min cosmetic alignment and why (`elapsed below threshold` vs `clamped by headroom guard`).
 
 Initialize the accounting arrays once at the start of the worker loop:
 
@@ -2141,6 +3275,8 @@ SUB_ROUND_TIMELOGS=()
 Before staging and committing, inspect the diff to decide whether the change is trivial enough for an unattended commit or risky enough to deserve a human pass. This step runs **before** `git add` in Step 6.7, so the measurement uses `git diff HEAD` (working tree + index, against the last commit) — that way both freshly modified files and anything that was already staged earlier in the run are counted:
 
 ```bash
+# (run preamble — see Step 3)
+TASK_ID="<current task id>"
 MODE=$(jq -r '.auto_commit_mode // "when_safe"' "$CONFIG_FILE")
 MAX_LINES=$(jq -r '.auto_commit_max_diff_lines // 100' "$CONFIG_FILE")
 
@@ -2156,10 +3292,17 @@ case "$MODE" in
     CHANGED=$(git diff HEAD --name-only 2>/dev/null)
 
     PATTERNS=$(jq -r '.auto_commit_risky_patterns[]' "$CONFIG_FILE" | paste -sd '|' -)
-    if [ -n "$PATTERNS" ] && echo "$CHANGED" | grep -qiE "$PATTERNS"; then
-      MATCHED=$(echo "$CHANGED" | grep -iE "$PATTERNS" | head -3 | tr '\n' ' ')
+    if [ -n "$PATTERNS" ] && printf '%s\n' "$CHANGED" | grep -qiE "$PATTERNS"; then
+      MATCHED=$(printf '%s\n' "$CHANGED" | grep -iE "$PATTERNS" | head -3 | tr '\n' ' ')
       REASONS+=("UI/template/styling files changed: ${MATCHED}")
     fi
+
+    # v1.5.0: an open security / reachability item from the Step 6.5.5
+    # self-check is worth a human look before it lands in a commit.
+    OPEN_QUALITY=$(awk -F '\t' -v id="$TASK_ID" \
+      '$1 == id && $3 == "open" && ($2 == "security" || $2 == "reachability") { printf "%s: %s; ", $2, $4 }' \
+      "$TW_JOB_DIR/build_quality.tsv" 2>/dev/null)
+    [ -n "$OPEN_QUALITY" ] && REASONS+=("open build-quality items: ${OPEN_QUALITY}")
 
     LINES=$(git diff HEAD --shortstat 2>/dev/null \
       | grep -oE '[0-9]+ (insertion|deletion)' \
@@ -2264,8 +3407,8 @@ if [ "${TIMELOG_SKIPPED:-0}" = "1" ]; then
   TIMELOG_OK=0
 else
 
-BILLABLE=$(jq -r '.is_billable_by_default // true' "$CONFIG_FILE")
-INCL_HASH=$(jq -r '.include_commit_hash_in_log_description // true' "$CONFIG_FILE")
+BILLABLE=$(jq -r '.is_billable_by_default | if . == null then true else . end' "$CONFIG_FILE")
+INCL_HASH=$(jq -r '.include_commit_hash_in_log_description | if . == null then true else . end' "$CONFIG_FILE")
 
 # Use the session cursor — NOT wall-clock time.
 # The `time` field is interpreted by Teamwork in the user's LOCAL/profile
@@ -2309,25 +3452,41 @@ fi
 fi  # end of TIMELOG_SKIPPED guard
 ```
 
-Verify HTTP status. On non-2xx → report to the user (do not retry blindly; the commit already exists). Do **not** advance `SESSION_CURSOR_TS` if the POST failed — the next successful log should reuse the same start time so the user's timesheet stays contiguous. Also **skip the next "move to Internal testing"** step, because the task is not yet considered finished from a billing standpoint.
+Verify HTTP status. On non-2xx → report to the user (do not retry blindly; the commit already exists). Do **not** advance `SESSION_CURSOR_TS` if the POST failed — the next successful log should reuse the same start time so the user's timesheet stays contiguous. Also **skip the next "move to the done column"** step (6.8.5), because the task is not yet considered finished from a billing standpoint.
 
-### 6.8.5 Move task to "Internal testing" (or fallback) on the board
+### 6.8.5 Move task to the done column ("Done - Local", fallbacks "Internal testing" → "Testing")
 
-If the time log succeeded and the project has a resolved done stage, post the card to the done column:
+If the time log succeeded and the project has a resolved done stage, post the card to the done column — `board_workflow.done_stage` (default *Done - Local*, the WAME board's column for work finished locally), else the first of `done_stage_fallbacks` (default *Internal testing*, then *Testing*) that exists on the task's board, as resolved in Step 3.3:
 
 ```bash
+# (run preamble — see Step 3)
+TASK_ID="<current task id>"
+TIMELOG_OK="<1 if the Step 6.8 POST succeeded, else 0>"
+PROJECT_ID=$(awk -F '\t' -v id="$TASK_ID" '$1 == id { print $2; exit }' "$TW_JOB_DIR/task_projects.tsv" 2>/dev/null)
+BOARD_FILE="$TW_JOB_DIR/board_${PROJECT_ID}.tsv"
+WORKFLOW_ID=""; DONE_STAGE_ID=""; DONE_RESOLVED_NAME=""; BOARD_DISABLED=1
+if [ -n "$PROJECT_ID" ] && [ -s "$BOARD_FILE" ]; then
+  WORKFLOW_ID=$(awk -F '\t'        '$1 == "workflow_id"        { print $2; exit }' "$BOARD_FILE")
+  DONE_STAGE_ID=$(awk -F '\t'      '$1 == "done_stage_id"      { print $2; exit }' "$BOARD_FILE")
+  DONE_RESOLVED_NAME=$(awk -F '\t' '$1 == "done_resolved_name" { print $2; exit }' "$BOARD_FILE")
+  BOARD_DISABLED=$(awk -F '\t'     '$1 == "disabled"           { print $2; exit }' "$BOARD_FILE")
+else
+  echo "  ⚠ [#${TASK_ID}] no project id / no Step 3.3 board state (project '${PROJECT_ID}') — board move to the done column skipped" >&2
+fi
+BW_ENABLED=$(jq -r '.board_workflow.enabled | if . == null then true else . end' "$CONFIG_FILE")
+
 if [ "${TIMELOG_OK:-0}" = "1" ] \
    && [ "$BW_ENABLED" = "true" ] \
-   && [ -z "${BOARD_MOVE_DISABLED[$PROJECT_ID]}" ] \
+   && [ "$BOARD_DISABLED" != "1" ] \
    && [ -n "$WORKFLOW_ID" ] && [ -n "$DONE_STAGE_ID" ]; then
   HTTP=$(curl -sS -o /dev/null -w "%{http_code}" -u "$AUTH" \
     -H "Content-Type: application/json" -H "Accept: application/json" \
     -X POST -d "{\"taskIds\":[${TASK_ID}]}" \
     "${BASE}/projects/api/v3/workflows/${WORKFLOW_ID}/stages/${DONE_STAGE_ID}/tasks.json")
   if [ "$HTTP" -ge 200 ] && [ "$HTTP" -lt 300 ]; then
-    CURRENT_BOARD_STAGE_FOR_TASK="${DONE_RESOLVED_NAME:-Internal testing}"
+    CURRENT_BOARD_STAGE_FOR_TASK="${DONE_RESOLVED_NAME:-done column}"
   else
-    echo "  ⚠ board move to '${DONE_RESOLVED_NAME:-Internal testing}' failed (HTTP $HTTP) — continuing" >&2
+    echo "  ⚠ board move to '${DONE_RESOLVED_NAME:-done column}' failed (HTTP $HTTP) — continuing" >&2
   fi
 fi
 ```
@@ -2367,24 +3526,42 @@ Continue the loop.
 
 After the loop ends, print a markdown table:
 
-| # | Task ID | Title | Minutes | Commit | TW status | Board stage |
-|---|---------|-------|---------|--------|-----------|-------------|
+| # | Task ID | Title | Minutes | Commit | TW status | Board stage | Build quality |
+|---|---------|-------|---------|--------|-----------|-------------|---------------|
+
+The **Build quality** cell comes from `$TW_JOB_DIR/build_quality.tsv`
+(Step 6.5.5), one short token per active key — e.g. `ui_ux ✓ · perf n/a ·
+sec ✓ · reach open(1) · fw ✓ +1 tip`, or `skipped (--dimensions=none)`. A
+task without rows in that file shows `not self-checked` — never an implied ✓.
+`+N tip` counts the task's `framework` `suggest` rows; they never turn the
+cell into a failure.
 
 Followed by a short status block:
 
 ```
 Time cursor: <TIME_CURSOR_SOURCE>           e.g. "last_timelog @ 10:50"
                                             or  "skill start (first log of day)"
-Tasklist filter (v1.3.0):                     <"To Do" + me — N implemented, M analyse-only, K dropped> | <disabled / single-task URL>
+Tasklist filter:                              <start columns <TF_TODO_LABEL> + me — N implemented, M analyse-only (K not on the board), L dropped> | <disabled / single-task URL>
 Analyse-only tasks (not touched):             <list of [#id] title from ANALYSE_ONLY_TASKS or none>
 Timelogs skipped (cursor caught up with now): <list from SKIPPED_TIMELOGS or none>
 Timelogs below 5-min rounding (sub-round):    <list from SUB_ROUND_TIMELOGS or none>
 Timelogs clamped to fit before now:           <list from CLAMPED_TIMELOGS or none>
-Attachments skipped (size):                   <list or none>
-Board moves disabled for projects:            <list or none>
+Attachments skipped (size):                   <lines of $TW_JOB_DIR/skipped_attachments.txt or none>
+Board moves disabled for projects:            <projects whose board_<id>.tsv says disabled 1, or none>
+Comments read (Step 3.5):                     <per task COMMENTS_STATE, e.g. "[#123] newest of 8 read">
+Open build-quality items (handed to QA):      <per task "[#id] <dimension>: <detail>" from build_quality.tsv rows with status open, or none>
+Framework versions (Step 6.2, detected once): <one line from framework_versions.tsv, e.g. "laravel/framework v12.53.0 · php ^8.4 · laravel/nova 5.7.7 · tailwindcss 3.4.19 · browserslist not set", or "not detected (framework dimension inactive)">
+Framework opportunities (advisory, not changed): <per task "[#id] <opportunity> @ <file:line>" from build_quality.tsv rows with status suggest, or none>
 ```
 
-When `SKIPPED_TIMELOGS` is non-empty, also print a short paragraph telling the user **why** those entries did not land in Teamwork (the cursor reached `now()` mid-run, typically because the model produces work faster than wall-clock) and suggest they either re-run later (the cursor will continue from the last successful log) or fill those minutes in manually. The skipped tasks' board cards were **not** moved to *Internal testing* either — they will be moved on the next run that successfully logs them.
+Render the open build-quality items verbatim, grouped per task — they are the
+part of the run the developer still owes, and Step 8 hands the same list to
+`/teamwork-task-test`. The framework opportunities are **not** owed: they sit
+in code the task did not otherwise change (the Step 6.3 no-drive-by
+guardrail), so list them as candidates for a separate refactor task, not as
+defects.
+
+When `SKIPPED_TIMELOGS` is non-empty, also print a short paragraph telling the user **why** those entries did not land in Teamwork (the cursor reached `now()` mid-run, typically because the model produces work faster than wall-clock) and suggest they either re-run later (the cursor will continue from the last successful log) or fill those minutes in manually. The skipped tasks' board cards were **not** moved to the done column (*Done - Local* or its fallback) either — they will be moved on the next run that successfully logs them.
 
 The push reminder is intentionally **not** printed here — it moves to Step 9, after the optional verification handoff, so the user sees test results before they decide whether to push.
 
@@ -2401,10 +3578,13 @@ If `config.auto_run_tests_after == true` (default, added in 1.1.1) and the user 
 The `teamwork-task-test` skill is published on the same WAME marketplace. Two signals tell us if it is currently installed in this session:
 
 1. **The Skill tool's available-skills list** — when invoked via the `Skill` tool, only listed skill names succeed. The model can see this list in the session's system-reminder messages. If `teamwork-task-test` appears there, it is installed.
-2. **Filesystem fallback** — check for an installed skill folder under the plugins cache:
+2. **Filesystem fallback** — check for an installed skill folder under the plugins cache
+   (`~/.claude/plugins/cache/<marketplace>/teamwork-task-test/<version>/skills/teamwork-task-test/SKILL.md`).
+   Use `find`, not a glob: the 1.4.2 `ls …/*/teamwork-task-test/SKILL.md`
+   never matched that depth, and in zsh an unmatched glob is a hard
+   `no matches found` error.
    ```bash
-   if ls "$HOME/.claude/plugins"/*/teamwork-task-test/SKILL.md >/dev/null 2>&1 \
-      || ls "$HOME/.claude/plugins"/*/skills/teamwork-task-test/SKILL.md >/dev/null 2>&1; then
+   if find "$HOME/.claude/plugins" -path '*teamwork-task-test*' -name SKILL.md -print 2>/dev/null | grep -q .; then
      TEST_SKILL_INSTALLED=1
    else
      TEST_SKILL_INSTALLED=0
@@ -2432,6 +3612,38 @@ TEST_ARGS="$ORIG_URL --time-log=true --language=${DEFAULT_LANG:-sk}"
 ```
 
 We pass `--time-log=true` explicitly so QA work continues the same sequential, non-overlapping time cursor that the implementation phase just advanced — both skills resolve the cursor via the **last Teamwork timelog of the day**, so the test skill's first log automatically starts where the implementation phase's last log ended (no gaps, no overlaps, no manual handover).
+
+### 8.2.5 — Hand the build-time quality notes to QA (v1.5.0)
+
+`/teamwork-task-test` reviews the same five keys (`ui_ux`, `performance`,
+`security`, `reachability`, `framework`) in its Step 6.6 — `framework` there
+is **advisory**: the tester only recommends, never edits code, never fails or
+downgrades an acceptance criterion and never blocks on it (only a feature
+newer than the installed version, the PHP floor or the browserslist target —
+code that will not run — is a real finding, filed under the other keys).
+Immediately **before** the `Skill` call, render the Step 6.5.5 results so they
+sit in the context the QA pass runs in — open items first, one line each with
+its location, then the `framework` rows marked as advisory:
+
+```
+Build-time quality notes for /teamwork-task-test (its Step 6.6 reviews the same keys):
+  [#123456] reachability — open: ExportLog is URL-only by design (e-mail deep link) → allow_orphans candidate @ app/Nova/ExportLog.php
+  [#123456] performance  — open: invoice export walks all rows in PHP; fine at 2 000, a full scan at 100 000 @ app/Actions/ExportInvoices.php:41
+  [#123457] ui_ux        — not_applicable (no UI files in diff)
+  [#123456] framework    — advisory, checked: Laravel 12.53: casts() + enum cast for ExportLog::status — docs eloquent-mutators#enum-casting
+  [#123456] framework    — advisory, suggest (not changed): number_format(…) . ' €' → Number::currency($total, 'EUR', 'sk') @ app/Support/InvoiceFormatter.php:31
+  Files: /tmp/tw_job_<ENTITY_ID>/build_quality.tsv, /tmp/tw_job_<ENTITY_ID>/framework_versions.tsv
+```
+
+The `framework` lines tell QA which versions and idioms the build already
+settled on, so its recommendations do not re-propose them; an installed
+`teamwork-task-test` older than 1.2.0 does not know the key and simply reads
+the lines as context.
+
+Do **not** narrow the test skill's `--dimensions` to what was checked here and
+do **not** add flags it does not know — QA runs its own configured set; this
+block and the TSV are the whole handoff. A task whose rows say
+`skipped(--dimensions)` is listed as such, so QA knows nobody looked.
 
 ### 8.3 — Invoke the test skill
 
@@ -2513,7 +3725,7 @@ fi
 # checks it at the top and returns early so we never render the action
 # prompt for an empty commit set.
 WT_HANDOFF_DONE=0
-SKIP_IF_EMPTY=$(jq -r '.worktree_handoff.skip_if_no_commits // true' "$CONFIG_FILE")
+SKIP_IF_EMPTY=$(jq -r '.worktree_handoff.skip_if_no_commits | if . == null then true else . end' "$CONFIG_FILE")
 if [ "$WT_NEW_COUNT" = "0" ] && [ "$SKIP_IF_EMPTY" = "true" ]; then
   echo "  ℹ worktree has no new commits since the run started — skipping handoff." >&2
   WT_HANDOFF_RESULT="skipped_no_commits"
@@ -2590,8 +3802,8 @@ Store the resolved target in `WT_MERGE_TARGET`.
 
 ```bash
 STRATEGY=$(jq -r '.worktree_handoff.merge_strategy // "ff_else_merge"' "$CONFIG_FILE")
-DELETE_BRANCH=$(jq -r '.worktree_handoff.delete_branch_after_merge // true' "$CONFIG_FILE")
-DELETE_WT=$(jq -r     '.worktree_handoff.delete_worktree_after_merge // true' "$CONFIG_FILE")
+DELETE_BRANCH=$(jq -r '.worktree_handoff.delete_branch_after_merge | if . == null then true else . end' "$CONFIG_FILE")
+DELETE_WT=$(jq -r     '.worktree_handoff.delete_worktree_after_merge | if . == null then true else . end' "$CONFIG_FILE")
 
 # All git operations target the MAIN repo. We can run `git -C "$MAIN_REPO"`
 # because the worktree branch is visible there too (worktrees share the
@@ -2686,13 +3898,17 @@ are cherry-picked into the user-selected target branch in chronological
 order:
 
 ```bash
+# WT_PICKED_SHAS: one short hash per line, oldest first. `while read`, not
+# an unquoted for-loop — zsh does not word-split an unquoted variable, so
+# the 1.4.2 loop handed git ONE argument made of every hash.
 git -C "$MAIN_REPO" checkout "$TARGET_BRANCH"
-for SHA in $WT_PICKED_SHAS; do
+while IFS= read -r SHA; do
+  [ -z "$SHA" ] && continue
   git -C "$MAIN_REPO" cherry-pick "$SHA" || {
     echo "  ⚠ cherry-pick of $SHA failed — pausing." >&2
     break
   }
-done
+done <<<"$WT_PICKED_SHAS"
 ```
 
 Cherry-pick conflicts are non-recoverable inside the skill — surface the
@@ -2763,7 +3979,7 @@ Skip this step when any of these hold:
 ### Step 10.1 — Discover and classify worktrees
 
 ```bash
-WTC_ENABLED=$(jq -r '.worktree_cleanup.enabled // true'                "$CONFIG_FILE")
+WTC_ENABLED=$(jq -r '.worktree_cleanup.enabled | if . == null then true else . end'                "$CONFIG_FILE")
 WTC_AUTO=$(jq    -r '.worktree_cleanup.auto_remove_merged_clean // false' "$CONFIG_FILE")
 WTC_STALE_DAYS=$(jq -r '.worktree_cleanup.stale_age_days // 14'        "$CONFIG_FILE")
 WTC_REPORT_EMPTY=$(jq -r '.worktree_cleanup.report_when_empty // false' "$CONFIG_FILE")

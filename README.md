@@ -10,17 +10,34 @@ entries. Push to remote is intentionally left to the user.
 
 Part of the [`wame`](https://github.com/wamesk/claude-code) Claude Code plugin marketplace.
 
-**Current version:** 1.4.0 — see [`CHANGELOG.md`](CHANGELOG.md) for the full release history.
+**Current version:** 1.5.0 — see [`CHANGELOG.md`](CHANGELOG.md) for the full release history.
+
+---
+
+## What's new in 1.5.0
+
+- **Comments are actually read again.** Up to 1.4.2 the plugin could report *"no comments"* on a task that had eight — four independent defects each produced that same silent result (reported in a colleague's *"Štyri cesty k nule"* analysis): an invalid sort key that made the comments endpoint answer HTTP 400, a gate on a `commentsCount` field Teamwork v3 never returns, a wrong timestamp field name, and `echo "$JSON" | jq` pipes that break in zsh (the macOS default shell Claude Code runs every snippet in). All four are fixed; failures now print a `⚠` line naming the endpoint and the fallback instead of continuing with empty context.
+- **The newest comment is always read.** `fetch_comments_mode: when_needed` now runs one cheap probe per task that returns the comment count *and* the newest comment. Whenever a task has comments, the newest one is read — it is the freshest truth and can overrule the description. The old heuristics (thin description, *"viď komentár"*) now only decide whether the **full thread** is fetched. `always` and `never` keep their meaning. A v1 fallback covers a failing v3 endpoint.
+- **Board moves, the tasklist filter and subtasks work again.** v3 task objects carry no `projectId`; the plugin now reads `.tasklist.meta.projectId`, so workflow detection, board moves (also for subtasks) and the tasklist filter get a real project. The filter reads each task's column from `workflowStages` (the `?include=cards,stages` lookup always came back empty).
+- **The new WAME board.** Work starts in **any of the start columns** — `tasklist_filter.todo_stages`, default *Ready for Development* and *To Do* — and a finished task moves to **Done - Local** (fallbacks *Internal testing* → *Testing*, so the older per-project boards keep landing where they did). *In progress* still resolves *In Progress* (case-insensitive). A task that is **not on the board** is now *analyse-only* ("not on the board") instead of being implemented — only the start columns are greenlit work; promote it from the plan when it is yours. See [Board workflow](#board-workflow) and [the migration rule](#migration-rule-for-the-board-columns).
+- **A completed task behind a single-task URL is not reworked silently.** The skill asks first — *Skip* (recommended) or *Process anyway*, with the warning that processing moves the card out of its done column. `skip_completed_tasks` keeps skipping completed tasks silently in tasklists and subtasks.
+- **Explicit `false` in the config is respected.** jq's `// true` treated `false` as missing, so `tasklist_filter.enabled`, `only_assigned_to_me`, `board_workflow.enabled`, `skip_completed_tasks`, `is_billable_by_default` and other switches could not be turned off (the migration even rewrote them to `true`).
+- **Attachments come from the right place.** Task files are resolved via `GET /tasks/{id}.json?include=attachments`; the old fallback endpoint ignored its task filter and returned the whole workspace's files.
+- **Build-time quality rules.** Every task is planned (Step 6.2), implemented (Step 6.3) and self-checked (new Step 6.5.5) against the same five dimensions `/teamwork-task-test` reviews at QA time — **UI/UX & accessibility, performance, security, page reachability** (a new screen gets its menu entry *and* inbound links from related screens in the same commit) **and framework best practices** (new or changed code uses the current idioms and built-in features of the framework / language versions the project actually has installed). What stays open is listed per task in the final summary and handed to `/teamwork-task-test`. Configure with `build_quality.dimensions` or `--dimensions=<csv>|none`.
+- **Framework versions are detected, not remembered.** Once per run the plugin reads `composer.lock`, `composer.json` (`require.php` / `config.platform.php`), `package.json` + `node_modules` / lock, `browserslist` and `.nvmrc` into `/tmp/tw_job_<id>/framework_versions.tsv`, and looks APIs up in current docs (Laravel Boost `search-docs` → context7 → official docs). Guardrails: project conventions win over a newer idiom, no drive-by rewrites of untouched code (such opportunities are only listed as advisory tips), nothing deprecated in — or newer than — the installed versions and the browserslist target. `/teamwork-task-test` treats `framework` as advisory: it recommends, it never fails an acceptance criterion on it.
+- **zsh-safe snippets.** Every snippet in the skill follows a documented *shell portability contract* (no echo pipes on API data, no swallowed parse errors, no unquoted `for` loops, no bash-only arrays, run state in files under `/tmp/tw_job_<id>/` instead of shell variables that die with each Bash call).
+
+The 1.5.0 migration is automatic and idempotent — your config gains `build_quality.dimensions` (all five) on the next run. A list written by a pre-release 1.5.0 build that holds exactly the four original keys gains `framework` once; any list you customised stays as it is (see [the migration rule](#migration-rule-for-framework)). The board keys move to the new WAME board only where you kept the old defaults: `todo_stages` is added (`["Ready for Development", "To Do"]`, or `[<your column>]` when you had customised `todo_stage`), and `done_stage: "Internal testing"` becomes `"Done - Local"` with `["Internal testing", "Testing"]` as fallbacks; a customised `done_stage` is never touched (see [the board migration rule](#migration-rule-for-the-board-columns)).
 
 ---
 
 ## What's new in 1.4.0
 
-- **Subtasks are first-class tasks.** When a parent task has subtasks (the common "container parent + N children" pattern — e.g. *Project bootstrap* with 8 subtasks for CI / auth / DB / …), the plugin now expands the parent in the working set and runs each subtask through the full pipeline: own description / acceptance criteria / comments / attachments fetch, own plan entry, own commit (`TYPE(scope)[<subtaskId>]: …`), own board move (*In progress → Internal testing*), own time log. The parent itself stays put on the board — it is just the container — and gets no commit and no time log.
-- **Tasklist filter applies to subtasks.** The v1.3.0 *To Do + assigned to me* rules run on the post-expansion set: a subtask in the wrong column or assigned to a teammate is dropped to *analyse-only* exactly like a top-level task. The single-task URL bypass still applies — paste the parent's URL, get all its subtasks processed regardless of column.
+- **Subtasks are first-class tasks.** When a parent task has subtasks (the common "container parent + N children" pattern — e.g. *Project bootstrap* with 8 subtasks for CI / auth / DB / …), the plugin now expands the parent in the working set and runs each subtask through the full pipeline: own description / acceptance criteria / comments / attachments fetch, own plan entry, own commit (`TYPE(scope)[<subtaskId>]: …`), own board move (*In progress → Internal testing* at the time; *Done - Local* with fallbacks since 1.5.0), own time log. The parent itself stays put on the board — it is just the container — and gets no commit and no time log.
+- **Tasklist filter applies to subtasks.** The v1.3.0 *To Do + assigned to me* rules (since 1.5.0: *start columns + me*) run on the post-expansion set: a subtask in the wrong column or assigned to a teammate is dropped to *analyse-only* exactly like a top-level task. The single-task URL bypass still applies — paste the parent's URL, get all its subtasks processed regardless of column.
 - **Parent context in the plan.** Each subtask's plan entry is prefixed with a one-line `Parent context:` showing the parent's name and a short description excerpt, so you can scan what the container is meant to deliver before reading the subtask. Disable with `"subtasks": {"include_parent_context": false}`.
 - **Recursive expansion** up to `subtasks.max_depth` (default `2`) — covers parent → subtask → sub-subtask. Set to `1` to expand only direct children; raise for deeper hierarchies.
-- **API shape tolerance.** Both v3 response shapes (`.tasks[]` and `.subtasks[]`) and both endpoints (`/tasks/{id}/subtasks.json` primary, `/tasks.json?parentTaskIds={id}` fallback) are supported transparently.
+- **API shape tolerance.** Both v3 response shapes (`.tasks[]` and `.subtasks[]`) and both endpoints (`/tasks/{id}/subtasks.json` primary, `/tasks.json?parentTaskId={id}` fallback) are supported transparently.
 - **Backward-compatible default-off path** — set `"subtasks": {"enabled": false}` to recover v1.3 behaviour entirely (parents stay in the working set, subtasks invisible). Existing single-task and tasklist runs that did not involve subtasks behave exactly the same as in v1.3.
 
 The 1.4.0 migration is automatic and idempotent. Your existing config gains the `subtasks` block on the next run with safe defaults.
@@ -29,8 +46,8 @@ The 1.4.0 migration is automatic and idempotent. Your existing config gains the 
 
 ## What's new in 1.3.0
 
-- **Tasklist filter (To Do + me)** — for **tasklist URLs**, only tasks in the board column `To Do` (exact, case-sensitive) AND assigned to the current Teamwork user are actually implemented. The rest of the tasklist is still fetched and rendered in the plan with a 1–2 sentence *Quick read* opinion, but the worker loop skips every mutation (no commit, no time log, no board move). Solves the common multi-repo case where a single Teamwork project holds a Laravel backend + an Ionic frontend owned by different developers — without the filter, running `/teamwork-task` from the backend repo would implement the frontend developer's tasks in the wrong codebase.
-- **Single-task URLs deliberately bypass the filter.** When the user opens a specific task by ID, we honour that intent regardless of which column the task sits in or who it is assigned to.
+- **Tasklist filter (To Do + me)** — for **tasklist URLs**, only tasks in the board column `To Do` (exact, case-sensitive; since 1.5.0 any of the start columns, default *Ready for Development* + *To Do*) AND assigned to the current Teamwork user are actually implemented. The rest of the tasklist is still fetched and rendered in the plan with a 1–2 sentence *Quick read* opinion, but the worker loop skips every mutation (no commit, no time log, no board move). Solves the common multi-repo case where a single Teamwork project holds a Laravel backend + an Ionic frontend owned by different developers — without the filter, running `/teamwork-task` from the backend repo would implement the frontend developer's tasks in the wrong codebase.
+- **Single-task URLs deliberately bypass the filter.** When the user opens a specific task by ID, we honour that intent regardless of which column the task sits in or who it is assigned to (since 1.5.0 a *completed* task asks first).
 - **Three new CLI flags** for per-run overrides: `--tasklist-filter=true|false`, `--tasklist-todo-stage=<name>`, `--tasklist-only-mine=true|false`.
 - **Plan-approval gate gains two new options:** *Promote an analyse-only task to implement* (flip one or more skipped tasks back to the implement set) and *Disable the tasklist filter for this run* (process everything regardless of stage/assignee).
 - Step 7 final summary now lists the filter activity and the analyse-only task IDs so the run report is honest about what was and was not implemented.
@@ -46,11 +63,11 @@ The 1.3.0 migration is automatic and idempotent — your existing config gains t
 
 - **Tasklist context** — tasklist description is shown on top of the plan so the whole batch is framed before per-task planning.
 - **Attachments** — task files, comment files, and file comments are pulled into `./teamwork-task-<id>/` and used as inline context. `.gitignore` is auto-updated; the folder is cleaned up after the time log succeeds.
-- **Conditional comments** — `fetch_comments_mode: when_needed` (default) only fetches comments when the description is thin or explicitly references them, short-circuited when `commentsCount=0`.
+- **Conditional comments** — `fetch_comments_mode: when_needed` (default) only fetches comments when the description is thin or explicitly references them. *(Superseded in 1.5.0: the count now comes from a real probe — the `commentsCount` field this relied on is never returned by Teamwork v3 — and the newest comment is always read; see [Fetching comments](#fetching-comments).)*
 - **Smart auto-commit gate** — UI/template files or diffs over 100 lines trigger a confirmation prompt; trivial textual changes commit and log automatically.
 - **Auto-proposed tests** — when a task does not specify how to verify the change, the skill sniffs `composer.json` / `package.json` for installed test frameworks (Pest, PHPUnit, Dusk, Vitest, Jest, Playwright, Cypress, Selenium) and proposes the right kind of test alongside the implementation. Visual changes default to a browser test (Dusk for Laravel, Playwright/Cypress for JS); backend changes to feature / unit tests.
 - **Smarter time cursor** — picks up from the end of today's most recent timelog (or skill start time for the day's first log). No overlap, no cross-midnight bleed, no future timestamps.
-- **Board workflow** — task auto-moves to `In progress` on start and `Internal testing` on finish (with fallback to `Testing`). Missing workflow/columns degrade silently with a warning in the plan.
+- **Board workflow** — task auto-moves to `In progress` on start and `Internal testing` on finish (with fallback to `Testing`). Missing workflow/columns degrade silently with a warning in the plan. *(1.5.0: the done target is `Done - Local`, fallbacks `Internal testing` → `Testing`; see [Board workflow](#board-workflow).)*
 - **Commit hash in time-log description** — every Teamwork timelog now ends with `(commit: <short-hash>)` for direct traceability.
 - **CHANGELOG.md** — proper Keep-a-Changelog file for the project.
 
@@ -117,11 +134,13 @@ Optional flags (override the saved config **for this run only**, not persisted):
 - `--auto-commit=always` — commit and log without prompting, no matter how risky the diff looks.
 - `--auto-commit=when_safe` — ask only for UI/template files or large diffs (default).
 - `--auto-commit=never` — always prompt before committing.
-- `--tasklist-filter=true|false` — **v1.3.0**, tasklist URLs only: filter implementation set to "To Do" + assigned to current user (default `true`). Single-task URLs ignore this flag.
-- `--tasklist-todo-stage=<name>` — override the column name used by the tasklist filter (default `"To Do"`, case-sensitive).
+- `--tasklist-filter=true|false` — **v1.3.0**, tasklist URLs only: filter implementation set to the start columns + assigned to current user (default `true`). Single-task URLs ignore this flag.
+- `--tasklist-todo-stage=<name>[,<name>…]` — override the start columns used by the tasklist filter for this run, comma-separated (default `"Ready for Development,To Do"`, each matched per `todo_stage_match_mode` — case-sensitive by default).
 - `--tasklist-only-mine=true|false` — toggle the assignee check independently of the stage check (default `true`).
 - `--worktree-handoff=ask|merge|push|leave` — **v1.3.0**, only when running inside a git worktree: what to do with the worktree's commits at end of run (default `ask`). `merge` = fast-forward / merge into a target branch; `push` = push the branch for a PR; `leave` = no-op.
 - `--worktree-target=ask|parent|main|<branch>` — when `--worktree-handoff=merge`, decide the target branch (default `ask`).
+- `--subtasks=true|false` — **v1.4.0**, expand parent tasks into their subtasks (default `true`).
+- `--dimensions=<csv>|none` — **v1.5.0**, which build-time quality dimensions to plan and self-check: any subset of `ui_ux,performance,security,reachability,framework`, or `none` (default: `build_quality.dimensions`, all five). See [Build-time quality](#build-time-quality-v150).
 
 ## What the plugin does, step by step
 
@@ -129,12 +148,13 @@ Optional flags (override the saved config **for this run only**, not persisted):
 2. **Loads or creates** the persistent config; prompts for credentials on first run; migrates v1.0.0 configs to the v1.1.0 schema.
 3. **Fetches** the task(s) via Teamwork REST API v3, including:
    - the **tasklist description** (for tasklist runs) — surfaced as *"Tasklist context"* in the plan,
-   - **comments** per task (when `fetch_comments_mode` says so),
+   - **comments** per task — the newest one whenever the task has any, the full thread when `fetch_comments_mode` says so,
    - **task attachments** into `./teamwork-task-<id>/`,
    - **comment attachments** into `./teamwork-task-<id>/comments/`,
    - **file comments** (when `fetch_file_comments=true`),
-   - the description **split on the first horizontal rule** into *acceptance criteria* (above HR) and *final summary* (below HR — treated as the authoritative goal),
-   - for each unique project, the **workflow + stages** so the card can be moved to the right column.
+   - the description split into *acceptance criteria* and *final summary* (treated as the authoritative goal) — in the canonical WAME format the criteria are the block under `## Akceptačné kritériá` / `## Acceptance criteria` up to the next horizontal rule, `### Prierezové požiadavky` included; otherwise the description is **split on the first horizontal rule** (above / below),
+   - for each unique project, the **workflow + stages** so the card can be moved to the right column,
+   - for a single-task URL pointing at a **completed** task, a question whether to process it at all (default: skip — processing would move its card out of the done column).
 4. **Renders a plan** (per `plan_mode`):
    - `overview` (default) — single tasklist-wide plan with goal / acceptance / approach / comments digest / attachments / board target per task → one approval.
    - `per_task` — same content but rendered and approved one task at a time inside the loop.
@@ -143,18 +163,19 @@ Optional flags (override the saved config **for this run only**, not persisted):
 5. For each task (in the approved order):
    - Starts a timer.
    - **Moves the card to "In progress"** on the project's board (if a workflow is configured).
-   - Plans the implementation internally using the final summary + acceptance criteria + comments + attachments. If a business decision or missing context is required, it **stops and asks** via `AskUserQuestion`.
-   - Implements the change in the current repo.
+   - Plans the implementation internally using the final summary + acceptance criteria + comments + attachments, including which of the five [build-time quality dimensions](#build-time-quality-v150) the change touches (and, once per run, the framework versions the project has installed). If a business decision or missing context is required, it **stops and asks** via `AskUserQuestion`.
+   - Implements the change in the current repo, following the quality rules of every dimension that applies.
    - Runs relevant tests, if any.
    - Runs Pint formatting for PHP changes.
+   - **Self-checks** its own diff against the applicable dimensions, fixes what is cheap, and records what stays open.
    - Stops the timer, rounds the duration **up** to the configured minute step (default 5).
    - **Safety gate** — if the diff touches UI/template/styling files or exceeds the line threshold, asks whether to commit, inspect first, or abort the task. Trivial edits skip this prompt.
    - Commits using the `TYPE(scope)[<task-id>]: Message` convention (no `Co-Authored-By` lines).
    - Logs time back to Teamwork via the API as a **sequential, non-overlapping** entry (see [Time logging behaviour](#time-logging-behaviour)) with a **business-oriented** Slovak description ending in `(commit: <short-hash>)`.
-   - **Moves the card to "Internal testing"** (or fallback **"Testing"**) once the time log succeeds.
+   - **Moves the card to "Done - Local"** (fallbacks **"Internal testing"** → **"Testing"**) once the time log succeeds.
    - Cleans up the attachment folder.
    - Optionally marks the task as completed in Teamwork.
-6. **Prints a summary table** (task ID, title, minutes, commit hash, TW status, **board stage**) and reminds you to `git push` manually.
+6. **Prints a summary table** (task ID, title, minutes, commit hash, TW status, **board stage**, **build quality**) with the open quality items per task, hands them to `/teamwork-task-test` when it is installed, and reminds you to `git push` manually.
 
 ## Configuration reference
 
@@ -165,7 +186,7 @@ File: `~/.claude/plugins/data/teamwork-task-wamesk/config.json`
 | `teamwork.base_url`                       | `https://<workspace>.teamwork.com`                                       | Your Teamwork workspace URL. Asked on first run.                                                                                                                                       |
 | `teamwork.api_token`                      | (empty)                                                                  | Personal API key. Asked on first run. Stored at chmod 0600.                                                                                                                            |
 | `plan_mode`                               | `overview`                                                               | `overview` (one approval for the whole tasklist), `per_task` (approval before each task), or `none`.                                                                                   |
-| `fetch_comments_mode`                     | `when_needed`                                                            | `always`, `when_needed` (default), or `never`. See [Fetching comments](#fetching-comments).                                                                                            |
+| `fetch_comments_mode`                     | `when_needed`                                                            | `always`, `when_needed` (default), or `never`. `when_needed` always reads the newest comment and fetches the full thread only when the description is thin. See [Fetching comments](#fetching-comments). |
 | `fetch_attachments`                       | `true`                                                                   | If `true`, task and comment file attachments are downloaded into `./teamwork-task-<id>/`.                                                                                              |
 | `fetch_file_comments`                     | `true`                                                                   | If `true`, comments attached to file objects are fetched and surfaced in the plan.                                                                                                     |
 | `max_attachment_size_mb`                  | `25`                                                                     | Files larger than this are skipped (listed in the plan + final summary, not downloaded).                                                                                               |
@@ -182,10 +203,11 @@ File: `~/.claude/plugins/data/teamwork-task-wamesk/config.json`
 | `test_opt_out_keywords`                   | `["no tests", "skip tests", "without tests", "bez testov", "netreba testy"]` | Phrases in the task description that disable auto-propose for that task.                                                                                                          |
 | `time_cursor_strategy`                    | `last_teamwork_timelog`                                                  | `last_teamwork_timelog` (default — pick up from today's last timelog) or `floor_now` (always start at the rounding boundary of the skill's launch time).                              |
 | `include_commit_hash_in_log_description`  | `true`                                                                   | Append ` (commit: <short-hash>)` to every Teamwork time-log description.                                                                                                               |
-| `board_workflow.enabled`                  | `true`                                                                   | Master toggle for board moves (in progress / internal testing).                                                                                                                        |
-| `board_workflow.in_progress_stage`        | `In progress`                                                            | Name of the column to move the card to when work starts. Match is case-insensitive.                                                                                                    |
-| `board_workflow.done_stage`               | `Internal testing`                                                       | Name of the column to move the card to when the time log succeeds.                                                                                                                     |
-| `board_workflow.done_stage_fallbacks`     | `["Testing"]`                                                            | Tried in order if `done_stage` does not exist in the project's workflow. First match wins.                                                                                             |
+| `board_workflow.enabled`                  | `true`                                                                   | Master toggle for board moves (in progress / done column). |
+| `board_workflow.in_progress_stage`        | `In progress`                                                            | Name of the column to move the card to when work starts. Match is case-insensitive, so it also resolves *In Progress* on the WAME board. |
+| `board_workflow.done_stage`               | `Done - Local`                                                           | **1.5.0 default** (was `Internal testing`). Name of the column to move the card to when the time log succeeds — the WAME board's column for work finished locally. |
+| `board_workflow.done_stage_fallbacks`     | `["Internal testing", "Testing"]`                                        | Tried in order if `done_stage` does not exist in the project's workflow (the older boards). First match wins. |
+| `board_workflow.done_stage_schema`        | `2`                                                                      | **v1.5.0** — migration marker, do not edit: records that the done-target migration ran, so choosing `Internal testing` again later is never undone. See [the board migration rule](#migration-rule-for-the-board-columns). |
 | `board_workflow.match_mode`               | `case_insensitive`                                                       | Reserved for future variants; today it is always case-insensitive.                                                                                                                     |
 | `time_mode`                               | `real_rounded_5m`                                                        | `real_rounded_5m` measures actual time; `ask` prompts after every task.                                                                                                                |
 | `time_rounding_minutes`                   | `5`                                                                      | Rounding step (minutes). Applies to both `real_rounded_5m` durations and the session cursor alignment.                                                                                |
@@ -194,11 +216,12 @@ File: `~/.claude/plugins/data/teamwork-task-wamesk/config.json`
 | `branching_mode`                          | `current_branch`                                                         | `current_branch` or `new_feature_branch`.                                                                                                                                              |
 | `default_language`                        | `sk`                                                                     | Language for the Teamwork time-log description (Slovak by default).                                                                                                                    |
 | `auto_complete_finished_tasks`            | `false`                                                                  | If `true`, the plugin marks each task as completed in TW after the commit + time log. Independent from board moves.                                                                    |
-| `skip_completed_tasks`                    | `true`                                                                   | If `true`, tasks already marked as completed in TW are skipped when iterating a tasklist.                                                                                              |
+| `skip_completed_tasks`                    | `true`                                                                   | If `true`, tasks already marked as completed in TW are skipped silently when iterating a tasklist or subtasks. A single-task URL pointing at a completed task always asks first (default: skip). |
 | `is_billable_by_default`                  | `true`                                                                   | Sets `isbillable` on every logged time entry.                                                                                                                                          |
-| `tasklist_filter.enabled`                 | `true`                                                                   | **v1.3.0** — for tasklist URLs only, filter to tasks in `tasklist_filter.todo_stage` AND assigned to the current user. Single-task URLs always bypass.                                  |
-| `tasklist_filter.todo_stage`              | `"To Do"`                                                                | Name of the board column that gates implementation. Matched per `todo_stage_match_mode`.                                                                                               |
-| `tasklist_filter.todo_stage_match_mode`   | `case_sensitive`                                                         | `case_sensitive` (default, strict match — `to do` does not match `To Do`) or `case_insensitive` (loose match).                                                                         |
+| `tasklist_filter.enabled`                 | `true`                                                                   | **v1.3.0** — for tasklist URLs only, filter to tasks in one of `tasklist_filter.todo_stages` AND assigned to the current user. Single-task URLs always bypass. |
+| `tasklist_filter.todo_stages`             | `["Ready for Development", "To Do"]`                                     | **v1.5.0** — the start columns: a task is implementable when its column is **any** of them (order = display only). Each matched per `todo_stage_match_mode`. Tasks not on the board are never implementable. An empty list falls back to `todo_stage`, then the default. |
+| `tasklist_filter.todo_stage`              | (legacy)                                                                 | Pre-1.5.0 single column name. Still read when `todo_stages` is absent or empty; the migration turns it into `todo_stages` once (`"To Do"` → the default pair, anything else → `[<name>]`) and leaves the key in place for older sibling plugins. |
+| `tasklist_filter.todo_stage_match_mode`   | `case_sensitive`                                                         | `case_sensitive` (default, strict match per start column — `to do` does not match `To Do`) or `case_insensitive` (loose match). |
 | `tasklist_filter.only_assigned_to_me`     | `true`                                                                   | Also require the current user to be in `task.assignees`. When `false`, only the stage check applies.                                                                                   |
 | `tasklist_filter.analyze_all_tasks`       | `true`                                                                   | When `true`, tasks that fail the filter are rendered in the plan as analyse-only with a *Quick read* line. When `false`, they are dropped entirely.                                    |
 | `tasklist_filter.skip_reason_render`      | `inline`                                                                 | `inline` (default) renders the skip reason next to each analyse-only task in the plan. Other modes reserved for future variants.                                                       |
@@ -213,6 +236,8 @@ File: `~/.claude/plugins/data/teamwork-task-wamesk/config.json`
 | `worktree_handoff.delete_worktree_after_merge` | `true`                                                              | If `true`, after a successful merge the worktree directory is removed with `git worktree remove`. The cwd may shift back to the main checkout.                                          |
 | `worktree_handoff.push_remote`            | `origin`                                                                 | Remote name used by the "push branch for PR" path and the dirty-main fallback.                                                                                                         |
 | `worktree_handoff.skip_if_no_commits`     | `true`                                                                   | If `true`, Step 9.5 is skipped silently when `HEAD` has not advanced this run (no new commits to hand off).                                                                            |
+| `build_quality.dimensions`                | `["ui_ux", "performance", "security", "reachability", "framework"]`      | **v1.5.0** — build-time quality dimensions planned (Step 6.2), followed (Step 6.3) and self-checked (Step 6.5.5) per task. Same keys `/teamwork-task-test` reviews (`framework` there as advisory only). `[]` = none. Per run: `--dimensions=`. |
+| `build_quality.dimensions_schema`         | `2`                                                                      | **v1.5.0** — migration marker, do not edit: records that the list was reconciled with the five-key set, so removing `framework` is never undone by a later run. See [the migration rule](#migration-rule-for-framework). |
 
 To change a setting, edit the file directly and rerun the command.
 
@@ -259,29 +284,31 @@ Combined, this gives you a fully hands-off pipeline: the skill implements, commi
 - **Persistently:** `"worktree_handoff": {"enabled": false}` in your config.
 - **Single-task runs from the main checkout** never trigger this step — the detection in Step 5.1 marks `WT_RUN_IN_WORKTREE=0` and Step 9.5 is a no-op.
 
-## Tasklist filter (v1.3.0)
+## Tasklist filter (v1.3.0, start columns since v1.5.0)
 
 For **tasklist** URLs only, the plugin filters which tasks get actually implemented:
 
-- Only tasks **in the board column `To Do`** (matched case-sensitively by default — `to do`, `TO DO`, `ToDo` do **not** match) AND
+- Only tasks **in one of the start columns** — `tasklist_filter.todo_stages`, default **`Ready for Development`** and **`To Do`** (the two start columns of the shared WAME board; an older board without *Ready for Development* simply uses *To Do*), each matched case-sensitively by default — `to do`, `TO DO`, `ToDo` do **not** match `To Do` — AND
 - **assigned to the current Teamwork user**
 
-are run through the worker loop. The rest of the tasklist's tasks are still fetched and shown in the plan with a short *Quick read* sanity-check line, but the plugin **never** commits, time-logs, or moves the board card for them.
+are run through the worker loop. The rest of the tasklist's tasks — including every task that is **not on the board** — are still fetched and shown in the plan with a short *Quick read* sanity-check line, but the plugin **never** commits, time-logs, or moves the board card for them.
 
-**Single-task URLs** (`/teamwork-task https://…/tasks/12345`) deliberately **bypass** the filter — when you point at a specific task by ID, the plugin honours that intent regardless of the task's column or assignee.
+**Single-task URLs** (`/teamwork-task https://…/tasks/12345`) deliberately **bypass** the filter — when you point at a specific task by ID, the plugin honours that intent regardless of the task's column or assignee. The one exception is a **completed** task: the plugin asks first whether to process it (default: skip), because processing moves its card out of the done column. Completed tasks inside a tasklist or among subtasks are skipped silently (`skip_completed_tasks`).
 
 The motivation is the standard multi-repo Kanban setup: a single Teamwork project commonly contains both a Laravel backend and an Ionic / iOS / Vue frontend, owned by different developers working in different repositories. Without the filter, running `/teamwork-task <tasklist-url>` from the Laravel repo would happily start implementing the frontend developer's tasks in the wrong codebase. The filter narrows the implementation set to what you actually own and is greenlit to work on, while still surfacing teammates' tasks in the same plan so you can sanity-check them in standup.
 
 ### How to override
 
-- **Per run:** `--tasklist-filter=false` (process all fetched tasks), `--tasklist-only-mine=false` (skip the assignee check), or `--tasklist-todo-stage="Ready"` (use a different column name).
-- **From the plan-approval prompt:** *Promote an analyse-only task to implement* (flip specific task IDs back to the implement set) or *Disable the tasklist filter for this run*.
-- **Persistently:** edit `~/.claude/plugins/data/teamwork-task-wamesk/config.json` and set `"tasklist_filter": {"enabled": false}`, or change `todo_stage` / `only_assigned_to_me` to whatever your team's convention is.
+- **Per run:** `--tasklist-filter=false` (process all fetched tasks), `--tasklist-only-mine=false` (skip the assignee check), or `--tasklist-todo-stage="Backlog"` / `--tasklist-todo-stage="Ready for Development,To Do,Backlog"` (other start columns, comma-separated).
+- **From the plan-approval prompt:** *Promote an analyse-only task to implement* (flip specific task IDs back to the implement set — also the way to take a task that is not on the board) or *Disable the tasklist filter for this run*.
+- **Persistently:** edit `~/.claude/plugins/data/teamwork-task-wamesk/config.json` and set `"tasklist_filter": {"enabled": false}`, or change `todo_stages` / `only_assigned_to_me` to whatever your team's convention is.
 
 ### Edge cases handled
 
-- **Project has no workflow at all** → filter degrades to "process everything" (no `To Do` to filter by). A one-line note is shown in the plan.
-- **Task has no card / is not on the board** → falls back to `process` so backlog items never get silently stranded.
+- **Task has no card / is not on the board** → **v1.5.0** *analyse-only* with reason `no_card`, shown as *"not on the board"* — a backlog item nobody moved into a start column is not greenlit work. Promote it from the plan when it is yours. (1.3.0–1.4.2 documented the opposite, *process*.)
+- **Project has no workflow at all** → every task is *not on the board*, so the whole tasklist is analyse-only and the plan asks how to proceed (disable the filter for this run, promote tasks, change the start columns, or cancel). A one-line note names the project.
+- **Board has only some of the start columns** (the older per-project boards have *To Do* but no *Ready for Development*) → the missing name never matches; nothing else changes. A board with none of them is named once in the plan.
+- **Task is on the board but its column cannot be read** (the workflow lookup failed, e.g. rate limit) → **v1.5.0** keeps it *analyse-only* with reason `stage_unresolved(<stageId>)` and a `⚠` line — an unreadable column is never treated as a start column.
 - **`/me.json` is unreachable** (token without `users.read` scope, network blip) → assignee check is skipped so you are never silently locked out of your own work; the stage check still applies.
 
 ## Subtasks (v1.4.0)
@@ -290,29 +317,29 @@ Teamwork's data model allows a task to have **subtasks** — child tasks under a
 
 ### How expansion works
 
-After the initial fetch and the tasklist-context lookup (Step 3.4), the plugin calls `GET /projects/api/v3/tasks/{id}/subtasks.json?include=cards,stages` (fallback: `GET /tasks.json?parentTaskIds={id}`) for every task in the working set. When subtasks come back, the parent is **removed from the implementation working set** and each subtask takes its place. From that point on every subtask goes through the full pipeline as if it were a top-level task:
+After the initial fetch and the tasklist-context lookup (Step 3.4), the plugin calls `GET /projects/api/v3/tasks/{id}/subtasks.json` (fallback when it fails: `GET /tasks.json?parentTaskId={id}` — singular, v3 ignores the plural `parentTaskIds` — filtered client-side) for every task in the working set. Each subtask's board column comes from its own `workflowStages`, its project from `.tasklist.meta.projectId`. When subtasks come back, the parent is **removed from the implementation working set** and each subtask takes its place. From that point on every subtask goes through the full pipeline as if it were a top-level task:
 
-- Step 3.5 — own comments fetch (`?include=cards,stages` data carries forward).
+- Step 3.5 — own comments probe (newest comment always, full thread when needed).
 - Step 3.6 — own description split (acceptance criteria above HR, final summary below).
 - Step 3.7 — own attachment folder `./teamwork-task-<subtaskId>/`.
 - Step 3.9 — own file-comments digest.
 - Step 3.10 — local working-tree discovery.
-- Step 3.45 — tasklist filter (when applicable) operates on the expanded set; a subtask in the wrong column or assigned to a teammate is dropped to *analyse-only* by the same rules as a top-level task.
+- Step 3.45 — tasklist filter (when applicable) operates on the expanded set; a subtask outside the start columns (not on the board included) or assigned to a teammate is dropped to *analyse-only* by the same rules as a top-level task.
 - Step 4 — own plan entry, prefixed with a `Parent context:` line (parent name + ≤ 300-char description excerpt) when `subtasks.include_parent_context = true`.
 - Step 5 — own timer; the same sequential, non-overlapping 5-min cursor.
-- Step 6 — own implementation, own `TYPE(scope)[<subtaskId>]: …` commit, own *In progress → Internal testing* board move.
+- Step 6 — own implementation, own `TYPE(scope)[<subtaskId>]: …` commit, own *In progress → Done - Local* board move (fallbacks *Internal testing* → *Testing*).
 - Step 5/6 timelog — own `POST /projects/api/v3/tasks/{subtaskId}/time.json` entry.
 
 ### Behavioural decisions baked in
 
 - **Parent stays put.** The parent is never moved across the workflow and gets no time log — it is a container, not a work item. When all its subtasks finish, the parent is **not** auto-clicked complete; close it manually if your team uses that convention.
 - **Per-subtask commits and time logs.** No aggregation into one parent timelog. Every subtask gets its own commit with its own ID in square brackets and its own 5-min-aligned timelog.
-- **Per-subtask board moves.** Each subtask has its own card and goes through *In progress → Internal testing* independently.
-- **Filter applies to subtasks.** A subtask in the wrong column or assigned to a teammate is dropped to `analyse_only` by Step 3.45 with the same `To Do + me` rules as a standalone task.
+- **Per-subtask board moves.** Each subtask has its own card and goes through *In progress → Done - Local* (or its fallback) independently.
+- **Filter applies to subtasks.** A subtask outside the start columns or assigned to a teammate is dropped to `analyse_only` by Step 3.45 with the same *start columns + me* rules as a standalone task.
 
 ### Single-task URL on a parent with subtasks
 
-`URL_KIND=task` and the URL points at a parent: Step 3.42 expands it into its 8 (or however many) subtasks. The tasklist filter is skipped (single-task URL bypass), so every subtask is `process_mode=process` regardless of column or assignee — you effectively get the same behaviour as feeding the plugin a tasklist URL with 8 children, minus the filter.
+`URL_KIND=task` and the URL points at a parent: Step 3.42 expands it into its 8 (or however many) subtasks. The tasklist filter is skipped (single-task URL bypass), so every open subtask is `process_mode=process` regardless of column or assignee (completed subtasks are skipped silently with `skip_completed_tasks`; a completed parent URL asks first) — you effectively get the same behaviour as feeding the plugin a tasklist URL with 8 children, minus the filter.
 
 ### Single-task URL on a subtask itself
 
@@ -330,9 +357,9 @@ Edit `~/.claude/plugins/data/teamwork-task-wamesk/config.json`:
 ### Edge cases handled
 
 - **Subtask in a different project than parent** → the per-project workflow cache (Step 3.3) picks up the extra project; the subtask's board move targets its own project's workflow.
-- **API shape variance** → both `.tasks[]` and `.subtasks[]` response shapes are accepted; both `/tasks/{id}/subtasks.json` (primary) and `/tasks.json?parentTaskIds={id}` (fallback) are tried.
+- **API shape variance** → both `.tasks[]` and `.subtasks[]` response shapes are accepted; both `/tasks/{id}/subtasks.json` (primary) and `/tasks.json?parentTaskId={id}` (fallback) are tried.
 - **`skip_completed_tasks = true`** → applies per subtask. A completed subtask is dropped from the expanded set the same way a completed top-level task is.
-- **Subtask has no card / not on the board** → falls back to `process` so backlog subtasks never get silently stranded.
+- **Subtask has no card / not on the board** → **v1.5.0** *analyse-only* (`no_card`) in a tasklist run, like a top-level task; promote it from the plan when it is yours. Under a single-task URL the filter is bypassed and it is processed.
 - **`subtasks.enabled = false`** → step is a complete no-op; v1.3 behaviour.
 
 ## Plan modes
@@ -345,7 +372,7 @@ The plan generation itself is **not** counted in any task's time log — the tim
 
 ## Task description convention (acceptance criteria + final summary)
 
-The plugin parses each task's description by splitting on the **first horizontal rule** (`<hr>` in HTML or `---` / `***` / `___` on its own line in Markdown):
+When the description is in the canonical WAME format written by `teamwork-task-analyze`, `-from-desk`, `-from-session` and `-from-dnr` (`[preamble] → --- → ## Akceptačné kritériá → --- → ## Cieľ → --- → ## Technický popis`), the acceptance criteria are the block from the `## Akceptačné kritériá` / `## Acceptance criteria` heading to the next horizontal rule — its `### Prierezové požiadavky` / `### Cross-cutting requirements` items included, which Step 6.2 treats as binding — and the preamble is context. Any other description is parsed by splitting on the **first horizontal rule** (`<hr>` in HTML or `---` / `***` / `___` on its own line in Markdown):
 
 ```
 Acceptance criteria:
@@ -371,13 +398,53 @@ When `URL_KIND=tasklist`, the **tasklist's own description** is rendered on top 
 `fetch_comments_mode` controls when the plugin pulls comments:
 
 - **`always`** — fetch comments for every task (legacy v1.0 behavior, more API calls).
-- **`when_needed`** (default) — fetch only when the task description is unlikely to be self-contained. Specifically: fetch only if `commentsCount > 0` *and* at least one of these holds:
-  - The description has no horizontal rule (no *final summary*), or
-  - The acceptance criteria above the HR is shorter than 100 characters, or
-  - The description text explicitly references comments (e.g. *"viď komentár"*, *"see comments"*, *"viz nižšie"*).
-- **`never`** — skip entirely, even when the description is sparse. Useful when the tasks are known to be fully described.
+- **`when_needed`** (default) — one probe per task (`GET …/comments.json?pageSize=1&orderBy=date&orderMode=desc`) returns the comment **count** and the **newest comment** in a single call:
+  - no comments → nothing to read;
+  - one or more → the **newest comment is always read**, because the last comment is the freshest truth and can change the spec even on a well-described task;
+  - more than one → the **full thread** is fetched as well when at least one of these holds:
+    - The description has no horizontal rule (no *final summary*), or
+    - The acceptance criteria above the HR is shorter than 100 characters, or
+    - The description text explicitly references comments (e.g. *"viď komentár"*, *"see comments"*, *"viz nižšie"*), or
+    - The newest comment refers back to earlier ones or contradicts the description.
+- **`never`** — skip entirely (no probe either), even when the description is sparse. Useful when the tasks are known to be fully described.
 
-Comments are kept in chronological order. The **last comment is the freshest truth** when comments contradict each other.
+Comments are sorted chronologically by `postedDateTime` (`orderBy=date`). If the v3 endpoint fails, the plugin prints a `⚠` line and falls back to the v1 endpoint (`/tasks/{id}/comments.json`, sorted by `datetime`); an unknown count means the full thread is read rather than assuming zero. The plan's *Comments context* line says exactly what was read (e.g. *"newest of 8 read — full thread not fetched"*). The **last comment is the freshest truth** when comments contradict each other or the description.
+
+## Build-time quality (v1.5.0)
+
+`/teamwork-task-test` reviews five cross-cutting dimensions at QA time. Since 1.5.0 this plugin applies the same five **while building**, so QA confirms instead of discovers:
+
+| Key | Applies when the change … | Build rule (short form) |
+| --- | --- | --- |
+| `ui_ux` | touches templates / components / views (`test_visual_file_patterns`) or a class feeding them | copy the sibling screen's patterns; accessible names; disabled controls say why; labels and `alt`; loading / empty / error states; every string through the translation layer with a resolving English key |
+| `performance` | adds queries, migrations, loops over records, batches, imports / exports | no query in a loop, eager loads, pagination, `chunkById`, indexes on new foreign keys and filtered columns, filter in SQL, slow work to a queue |
+| `security` | adds routes, actions, buttons, endpoints, inputs, raw queries | same gate as the neighbours **plus** an object-scoped policy (no IDOR), tenant scope intact, FormRequest validation, explicit `$fillable`, handled errors instead of 500s, no internals or secrets in messages |
+| `reachability` | adds, renames or removes a screen (page, view route, Nova resource / lens / dashboard / tool, SPA route) | the screen ships in the **same commit** with its **menu entry** and **inbound links** from related screens (relation tab on the parent, detail link, action, breadcrumb); a deliberately URL-only page is named as an `allow_orphans` candidate; renames leave no dead links; menu visibility matches route authorization |
+| `framework` | writes or changes code in PHP, Laravel, Nova, Livewire, Inertia, Pest, JS / TS, Vue, React, CSS or Tailwind — almost every code task | new or changed code uses the current idiom / built-in feature of the **installed** version (looked up in current docs, not remembered) instead of a dated or hand-rolled pattern; project conventions win; no drive-by rewrites; nothing deprecated in, or newer than, the installed version / PHP floor / browserslist target; no new dependency for a built-in |
+
+How it runs per task:
+
+1. **Plan (Step 6.2)** — decide from the shape of the change which dimensions apply; a pure backend task records `ui_ux: not_applicable` instead of growing UI boilerplate.
+2. **Implement (Step 6.3)** — follow the rules of every dimension that applies.
+3. **Self-check (Step 6.5.5)** — walk the task's own diff, fix what is cheap now, and record one status per dimension: `checked`, `not_applicable`, `skipped(--dimensions)` or `open(<item> @ <file:line>)`. For `framework` it also records up to three advisory `suggest(<opportunity> @ <file:line>)` tips for code the task read but did not change. A dimension is never reported as checked when it was not read.
+4. **Report & hand off** — the final summary shows a *Build quality* cell per task plus every open item, the detected framework versions and the advisory framework tips; open `security` / `reachability` items make the commit safety gate ask first (default `auto_commit_mode=when_safe`) — `framework` rows never do; the list is handed to `/teamwork-task-test` before it runs, with the `framework` lines marked advisory. Nothing is blocked silently.
+
+Turn it off per run with `--dimensions=none`, or persistently with `"build_quality": {"dimensions": []}`.
+
+### Framework best practices (`framework`)
+
+The fifth dimension asks for the idioms and built-in features of the versions the project **actually has installed**, not the ones a model remembers from older releases:
+
+1. **Detect the versions once per run** (Step 6.2) into `/tmp/tw_job_<id>/framework_versions.tsv` — `laravel/framework`, `laravel/nova`, `livewire/livewire`, `inertiajs/inertia-laravel`, `pestphp/pest`, `laravel/boost` from `composer.lock`; the PHP constraint from `composer.json` (`require.php`, `config.platform.php`); `vue`, `react`, `nuxt`, `vite`, `typescript`, `tailwindcss`, `@inertiajs/*`, `@ionic/*` from `node_modules` → `package-lock.json` → `yarn.lock` → the declared range; the `browserslist` target; the Node version (`.nvmrc` / `.node-version` / `engines.node`). The first task of the run detects, later tasks reuse (a task that changes a manifest or lock file drops the cache, so the next one detects again). PHP language features are bounded by the lowest PHP the project admits (`config.platform.php`, else the floor of `require.php`), not by your local `php -v`.
+2. **Look the API up in current docs** — Laravel Boost `search-docs` when the project has `laravel/boost`, otherwise the context7 MCP, otherwise the official docs; per major version skim the upgrade guide for what is new and deprecated.
+3. **Build within the guardrails** — the project's `CLAUDE.md` and sibling conventions win over a newer idiom; no second pattern next to an established one (unless the task is the refactor); no drive-by rewrites of untouched code (those become advisory tips in the summary); never a deprecated API; never a feature newer than the installed version, the PHP floor or the browserslist target (that one is a bug and is fixed before the commit); no new dependency for something the framework ships.
+
+On the QA side `/teamwork-task-test` (1.2.0+) treats `framework` as **advisory**: recommendations only, no code edits, never a failed or downgraded acceptance criterion, never a blocker (only code that will not run on the installed versions / browserslist target is a real finding, filed under the other keys). Sibling plugins that write task descriptions (`teamwork-task-analyze`, `-from-desk`, `-from-session`, `-from-dnr`) put `framework` notes into the technical plan, never into the acceptance criteria.
+
+### Migration rule for `framework`
+
+`build_quality.dimensions_schema` records which key set your list was last reconciled with (absent = a four-key list from a pre-release 1.5.0 build; `2` = five keys). The Step 2.6 migration adds `framework` **once**, and only when the marker is absent and the list is exactly `ui_ux`, `performance`, `security`, `reachability` (each once, any order) — such a list cannot be told apart from the untouched old default. Every other list counts as customised and is left untouched: a subset, `[]`, a list that already names `framework`, or one with other keys. A missing list gets the five-key default. Afterwards the marker is `2`, so if you remove `framework` from the list it stays removed on every later run.
+
 
 ## Attachments
 
@@ -450,16 +517,23 @@ When the chosen framework is not installed (e.g. a visual change in a Laravel pr
 
 **What gets committed**
 
-When the skill auto-proposes tests, the implementation **and** the test file land in the same commit, so the time log line `(commit: <hash>)` covers both. The next *Internal testing* board move signals that a human can pick up where automated verification stopped.
+When the skill auto-proposes tests, the implementation **and** the test file land in the same commit, so the time log line `(commit: <hash>)` covers both. The next board move to the done column (*Done - Local*, or *Internal testing* / *Testing* on older boards) signals that a human can pick up where automated verification stopped.
 
 ## Board workflow
 
 When `board_workflow.enabled=true` (default), the plugin moves the Teamwork card across the project's Kanban board as work progresses:
 
 - At the **start** of each task (right after the timer starts) → move to `board_workflow.in_progress_stage` (default `"In progress"`).
-- After the **time log succeeds** → move to `board_workflow.done_stage` (default `"Internal testing"`). If that column does not exist in the project, the plugin tries the names in `board_workflow.done_stage_fallbacks` (default `["Testing"]`) in order; first match wins.
+- After the **time log succeeds** → move to `board_workflow.done_stage` (default **`"Done - Local"`** since 1.5.0). If that column does not exist in the project, the plugin tries the names in `board_workflow.done_stage_fallbacks` (default `["Internal testing", "Testing"]`) in order; first match wins.
 
-Stage matching is **case-insensitive** — `"INTERNAL TESTING"`, `"Internal testing"`, and `"internal testing"` all match the same column.
+Stage matching is **case-insensitive** — `"DONE - LOCAL"`, `"Done - Local"`, and `"done - local"` all match the same column, and the default `"In progress"` matches *In Progress* on the WAME board.
+
+Both board generations work with the defaults (verified with read-only requests on 2026-09-24):
+
+| Board | Start columns (tasklist filter) | In progress | Done target |
+| --- | --- | --- | --- |
+| Shared **WAME workflow** (Planned tasks · … · Ready for Development · To Do · In Progress · On Hold · Done - Local · Deployed to DEV · …) | *Ready for Development*, *To Do* | *In Progress* | *Done - Local* |
+| Older per-project boards (Next Sprint · Waiting for approval · To Do · In progress · On hold · Testing · Done - ready to deploy · …) | *To Do* | *In progress* | *Testing* (fallback) |
 
 What happens if a stage is missing:
 
@@ -473,6 +547,15 @@ Failures of the move POST itself (HTTP non-2xx) are **non-fatal**: the plugin lo
 Interaction with `auto_complete_finished_tasks`: both run independently. If you enable task completion *and* board moves, the task ends up `completed=true` and in the done stage simultaneously, which Teamwork handles fine.
 
 If the safety gate at commit time results in **Abort task**, the card stays in *In progress* (semantically correct — the task was not completed).
+
+### Migration rule for the board columns
+
+The shared WAME board starts work in *Ready for Development* or *To Do* and ends it in *Done - Local*; older boards end in *Internal testing* or *Testing*. The Step 2.6 migration moves your config to the new board **only where you kept the old defaults**, idempotently:
+
+- **Start columns** — `tasklist_filter.todo_stages` is added once, only when it is missing (or `null`): `["Ready for Development", "To Do"]` when `todo_stage` was missing or the old default `"To Do"`, `[<your column>]` when you had customised it (`"Backlog"` → `["Backlog"]`). An existing `todo_stages` is never overwritten; the legacy `todo_stage` key stays in the file.
+- **Done target** — `board_workflow.done_stage` moves from the old default `"Internal testing"` to `"Done - Local"`, and the fallbacks become `["Internal testing", …your other fallbacks except "Done - Local"…]` (deduplicated, `"Testing"` kept). A customised `done_stage` (anything but `"Internal testing"`) is never touched. `board_workflow.done_stage_schema: 2` records that the check ran, so if you set `"Internal testing"` again afterwards it stays.
+
+Examples: the 1.4.2 default (`"Internal testing"` + `["Testing"]`) and a config that already listed `"Done - Local"` as a fallback (`"Internal testing"` + `["Done - Local", "Testing"]`) both end as `"Done - Local"` + `["Internal testing", "Testing"]`; `"QA review"` + `["Testing"]` stays as it is. `in_progress_stage` is not migrated — `"In progress"` already matches *In Progress* case-insensitively.
 
 ## Time logging behaviour
 
@@ -494,7 +577,7 @@ The session cursor's starting position is controlled by `time_cursor_strategy`:
 
 The final summary prints which source was used (`last_timelog @ 10:50` or `skill start (first log of day)`), so you can always verify which strategy actually fired.
 
-If a `POST` to Teamwork fails (network blip, 5xx), the cursor does **not** advance — the next successful log keeps the same start time so your timesheet stays contiguous, **and** the corresponding *Move to "Internal testing"* board step is skipped (the task is not yet billed).
+If a `POST` to Teamwork fails (network blip, 5xx), the cursor does **not** advance — the next successful log keeps the same start time so your timesheet stays contiguous, **and** the corresponding move to the done column (*Done - Local* or its fallback) is skipped (the task is not yet billed).
 
 ## Time-log description tone
 

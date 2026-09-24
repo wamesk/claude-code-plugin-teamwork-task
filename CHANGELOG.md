@@ -7,6 +7,301 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.5.0] - 2026-09-24
+
+The skill could report *"task has no comments"* on a task with eight — and
+carry on with empty context, indistinguishable from a correct run. Four
+independent defects each produced that silent result (reported in a
+colleague's *"Štyri cesty k nule"* analysis). The same classes of bug also
+emptied the subtask expansion, the board workflow, the tasklist filter and
+the attachment list. All were confirmed against the live Teamwork API with
+read-only requests and are fixed below; on top of that the skill now builds
+every task against the five quality dimensions `teamwork-task-test` checks
+at QA time — the fifth, `framework`, asks for the current idioms of the
+framework versions the project actually has installed — and follows the new
+WAME board: work starts in *Ready for Development* or *To Do* and finished
+work lands in *Done - Local*.
+
+### Fixed
+
+- **Comments endpoint answered HTTP 400 and the error was read as "no
+  comments".** Step 3.5 sorted with `orderBy=` a key v3 does not know; the
+  endpoint answers `400 {"detail":"orderBy: unknown comment sort."}`, the
+  status was never checked and the error body parsed as an empty list. Now
+  `orderBy=date` (chronological) with an explicit HTTP check, pagination while
+  `.meta.page.hasMore`, and a v1 fallback (`/tasks/{id}/comments.json`, sorted
+  by `datetime`). Repro: `GET /projects/api/v3/tasks/45198800/comments.json`
+  with the old sort key → 400; with `orderBy=date` → 8 comments.
+- **The `when_needed` comment gate never opened.** It required
+  `task.commentsCount > 0`, a field Teamwork v3 never returns, so with the
+  default mode comments were never fetched. The count now comes from a one-item
+  probe (`pageSize=1&orderBy=date&orderMode=desc` → `.meta.page.count`, v1
+  fallback `."todo-item"."comments-count"`). Repro: `jq .task.commentsCount` on
+  `GET /projects/api/v3/tasks/45198800.json` → `null`, while the task has 8
+  comments.
+- **Comment timestamps and bodies were read from fields that do not exist.**
+  The skill documented the comment time under a field name v3 does not have,
+  so chronological order and "the last comment wins" could not work. Now
+  `postedDateTime`, `htmlBody` / `body`, `postedByUserId`, and `files[]`
+  resolved through `?include=files`; comments are normalized (v1 mapped onto
+  the v3 names) into one chronological file per task. Repro: the first
+  comment of task 45198800 is `2026-08-14T09:32:28Z` in `postedDateTime`; the
+  old field yields `null` for all 8.
+- **`echo "$JSON" | jq` broke in zsh — the systemic one.** Claude Code runs
+  every snippet in the user's login shell (zsh on macOS), whose builtin `echo`
+  expands `\n`, `\\` inside the JSON; jq then rejects the response
+  (`control characters from U+0000 through U+001F must be escaped`) and
+  `2>/dev/null || echo 0` turned that into zero subtasks (Step 3.42), no
+  workflow stages (Step 3.3), a broken tasklist filter (Step 3.45), no files
+  (Steps 3.7 / 3.8) and no timelog cursor (Step 5.5). Every such pipe is now a
+  here-string (`jq … <<<"$VAR"`) or `printf '%s\n'`, and every parse / HTTP
+  failure prints a `⚠` line naming the endpoint and the fallback. Repro: the
+  subtask list of task 45092249 contains `\\\n` in a description — the 1.4.2
+  idiom yields `SUB_COUNT=0` in zsh, the here-string yields 5.
+- **`projectId` was always null, so board moves never happened.** v3 task
+  objects carry no `projectId` key; the project lives in
+  `.tasklist.meta.projectId`. Step 3.3 therefore fetched workflows for an
+  empty project, and the board moves (Steps 6.1.5 / 6.8.5) were always
+  skipped. Now `.projectId // .tasklist.meta.projectId` (v1 fallback
+  `."todo-item"."project-id"`) for tasks **and** subtasks, persisted to a
+  `taskId → projectId` table. Repro: `jq .task.projectId` on task 45198800 →
+  `null`; `.task.tasklist.meta.projectId` → `700336`.
+- **Tasklist filter treated every task as having no column.** Step 3.45 read
+  the column from `?include=cards,stages`, which returns an empty `.included`
+  (and `cardId: null`) on the tasks endpoints, so every task looked as if it
+  were off the board and the filter could not tell a *To Do* task from any
+  other. The column now comes from each task's `workflowStages[0].stageId`
+  resolved through the project's stage table, empty fields no longer shift
+  TSV columns, and expanded parents leave the filter set while their subtasks
+  join it. A task that *is* on a board but whose column cannot be named (the
+  Step 3.3 workflows GET failed, e.g. on HTTP 429) fails closed as
+  `analyse_only` with `stage_unresolved(<stageId>)` and a `⚠` line, instead
+  of passing the stage check. (What happens to a task that is genuinely off
+  the board is a deliberate change — see *Changed*.) Repro (tasklist 3361804,
+  85 tasks): the 1.4.2 loader dies on jq in zsh and the filter sees 0 of 85
+  tasks; in bash all 85 load with an empty column. Now each task carries its
+  real column (`To Do`, `Next Sprint`, …).
+- **An explicit `false` in the config was ignored — and rewritten.** Booleans
+  were read as `.x // true`, and jq's `//` treats `false` like a missing
+  value, so `"tasklist_filter": {"enabled": false}` (the documented way to
+  switch the filter off), `only_assigned_to_me`, `analyze_all_tasks`,
+  `board_workflow.enabled`, `subtasks.enabled`, `readiness_gate.enabled`,
+  `worktree_cleanup.enabled` and the `worktree_handoff` switches all read back
+  as `true`. Worse, the Step 2.6 migration's `(.x //= true)` rewrote
+  `skip_completed_tasks`, `is_billable_by_default`, `fetch_attachments`,
+  `fetch_file_comments`, `auto_propose_tests`, `auto_run_tests_after` and
+  `include_commit_hash_in_log_description` from `false` back to `true` on
+  every run — a user who switched billable time off got billable timelogs
+  again. Boolean defaults now apply only to a missing / `null` value
+  (`if . == null then true else . end`), and the rule is part of the
+  portability contract. Repro: `jq -n '{"a": false} | .a // true'` → `true`;
+  on tasklist 3367748 with `only_assigned_to_me: false` Step 3.45 still
+  dropped every teammate's task as `wrong_assignee` before the fix and keeps
+  the two *To Do* tasks after it.
+- **Task attachments were fetched from a 404 endpoint and a fallback that
+  returned the whole workspace.** `/projects/api/v3/tasks/{id}/files.json`
+  answers 404; the `/projects/api/v3/files.json?taskIds=` fallback ignores the
+  filter (100 of 19 042 workspace files per page) and would have downloaded
+  unrelated files; `/files/{id}/download` is a 404 as well. Now
+  `GET /tasks/{id}.json?include=attachments` → `.included.files` with
+  `downloadURL` (or `/projects/api/v3/files/{id}.json`). Repro: task 45229457
+  → 2 attachments, both downloaded.
+- **The Step 3.42 subtask fallback asked a filter v3 ignores.** When
+  `/tasks/{id}/subtasks.json` failed, the fallback called
+  `tasks.json?parentTaskIds=<id>`; v3 silently ignores the plural parameter and
+  returns the first 100 tasks of the whole site, which the client-side
+  `parentTaskId` filter then reduced to "0 subtasks" — the parent stayed a leaf.
+  The fallback now uses the singular `parentTaskId=<id>` (the same fix
+  `teamwork-task-analyze` 1.3.0 ships); the client-side filter stays as a guard.
+  Repro: `tasks.json?parentTaskIds=45379220` → 100 rows from 7 unrelated
+  parents, `hasMore: true`; `tasks.json?parentTaskId=45379220` → its 8 subtasks.
+- **Acceptance criteria in the canonical WAME format were read from the wrong
+  block.** Step 3.6 split the description on the first HR, but the format the
+  sibling plugins write (`[preamble] → HR → Akceptačné kritériá → HR → Cieľ → …`)
+  puts the reporter's preamble — or nothing, when the description starts with
+  the HR — above it, so the checklist Step 6 verified against was the preamble
+  and the real criteria, including the new `### Prierezové požiadavky` block,
+  were treated as summary. When an `## Akceptačné kritériá` /
+  `## Acceptance criteria` heading exists, the criteria are now the block from
+  that heading to the next HR (the same block `teamwork-task-test` ticks), and
+  Step 6.2 treats a cross-cutting block there as binding; other descriptions
+  keep the first-HR split.
+- **zsh loops and arrays.** Unquoted `for E in $EXTS` / `for H in $HINTS`
+  (Step 3.10) and `for SHA in $WT_PICKED_SHAS` (Step 9.5.5) iterate once in
+  zsh, so local discovery built one `-iname` term that matched nothing and the
+  cherry-pick got one argument made of every hash; they are `while read`
+  loops now. The per-project `BOARD_MOVE_DISABLED[$PROJECT_ID]` /
+  `TODO_STAGE_MISSING_FOR_PROJECT[...]` arrays (a 700 000-slot array in zsh,
+  empty in every fresh shell) are replaced by per-project board files; a
+  `local` repeated inside the subtask loop (prints `X=value` in zsh) is gone.
+  Repro: `zsh -c 'E=$(printf "docx\npdf"); for x in $E; do echo $x; done'`
+  prints one line.
+- **Cross-step state lived in shell variables.** Every Bash tool call is a
+  fresh shell, so `USER_ID`, `WORKFLOW_ID`, the comments, the tasklist JSON and
+  the undefined `$CLAUDE_JOB_DIR` (Step 3.10 read `/tasks.json` from the
+  filesystem root) were empty in later steps. State now lives in
+  `/tmp/tw_job_<ENTITY_ID>/` (reset at Step 3, together with the per-entity
+  Step 3.42 / 3.45 tables, so a stale `analyse_only` verdict cannot survive a
+  `--tasklist-filter=false` re-run) and every snippet that reads Teamwork data
+  or run state starts with a short run preamble; the Step 3 snippet now writes
+  the Step 3.42 working-set file itself. The few worker-loop scalars (time
+  cursor, timer start) are still carried by the executor between calls, as
+  the portability contract states.
+- **Step 8 never detected an installed `teamwork-task-test`.** The glob
+  `~/.claude/plugins/*/teamwork-task-test/SKILL.md` does not match the cache
+  layout (`cache/<marketplace>/teamwork-task-test/<version>/skills/…`) and is a
+  hard `no matches found` error in zsh; it is a `find` now.
+- The readiness gate (Step 6.0) formatted four values with three `%s` and
+  scanned an empty description in a fresh shell; it now reads the
+  description and the normalized comments from the run files.
+
+### Added
+
+- **Build-time quality rules** — the dimensions `teamwork-task-test`
+  (Step 6.6) reviews at QA time, applied while building: `ui_ux`,
+  `performance`, `security`, `reachability` and `framework` (next entry).
+  Step 6.2 decides per task which dimensions the change shape touches (UI
+  files → `ui_ux`; queries, migrations, loops → `performance`; new routes /
+  actions / endpoints / inputs → `security`; any new screen →
+  `reachability`; code in a versioned framework → `framework`) and plans the
+  concrete steps — above all, a new screen gets its menu entry **and**
+  inbound links from related screens in the same commit. Step 6.3 carries
+  short imperative rules per dimension. The new **Step 6.5.5 Quality
+  self-check** walks the task's diff before the timer stops, fixes what is
+  cheap, and records one status per dimension (`checked` /
+  `not_applicable` / `skipped(--dimensions)` / `open(<item> @ <file:line>)`)
+  — never claiming a dimension it did not read. Open items appear per task in
+  the Step 7 summary, make the Step 6.6.5 safety gate ask (in the default
+  `when_safe` mode) when they are `security` / `reachability`, and are handed
+  to `/teamwork-task-test` in the new Step 8.2.5. Why: QA used to be the first
+  place anyone asked whether a new page was reachable from the menu or a new
+  action was policy-checked; asking at build time is cheaper.
+- **`framework` — the fifth dimension: best practices of the installed
+  versions.** Model memory lags behind the frameworks, so new code tended to
+  use dated patterns (or hand-roll what the framework ships) even in a
+  project on Laravel 12 / Nova 5 / Tailwind 4. Step 6.2 now detects the real
+  versions **once per run** from `composer.lock`, `composer.json`
+  (`require.php`, `config.platform.php`), `package.json` + `node_modules` /
+  `package-lock.json` / `yarn.lock`, `browserslist` and `.nvmrc` /
+  `.node-version` / `engines.node`, caches them in
+  `/tmp/tw_job_<id>/framework_versions.tsv` (dropped after a task that changes
+  a manifest or lock file), and plans the idiom to use after
+  looking the API up in current docs (Laravel Boost `search-docs` → context7
+  → official docs). Step 6.3 applies it to **new or changed code only**, within
+  guardrails: project `CLAUDE.md` and sibling conventions win over a newer
+  idiom, no second pattern next to an established one, no drive-by rewrites,
+  nothing deprecated in — or newer than — the installed version, the PHP floor
+  or the browserslist target, no new dependency for a built-in. Step 6.5.5
+  checks the diff for deprecated APIs, hand-rolled built-ins and too-new
+  features (the last one is a bug and is fixed before the commit) and records
+  up to three advisory `suggest` rows for opportunities in untouched code (a
+  defect there — an N+1, a missing policy — stays an `open` row under its own
+  key). `framework` rows never make the safety gate ask. Step 7 prints the detected
+  versions and the advisory tips; Step 8.2.5 hands them to
+  `/teamwork-task-test` marked advisory (its 1.2.0 only recommends on this
+  key and never fails or downgrades an acceptance criterion on it).
+- `build_quality.dimensions` config key (default all five) and the
+  `--dimensions=<csv>|none` flag, mirroring `teamwork-task-test`. The Step 2.6
+  migration merges the key idempotently (an explicit `[]` is preserved) and
+  adds `framework` **once** to a list written before the key existed — only
+  when that list is exactly the old four-key default (any order); a subset,
+  `[]`, or a list with other keys is a user choice and stays untouched. A new
+  `build_quality.dimensions_schema: 2` marker records that the check ran, so
+  removing `framework` later is never undone. Verified on scratch configs in
+  zsh and bash: a 1.4.2 config gets all five keys, a pre-release four-key
+  list (in any order) gains `framework`, customised lists do not, and a second
+  run changes nothing.
+- **Shell portability contract** near the top of SKILL.md — the shell (and
+  jq) rules behind the fixes above, in nine bullets, so future edits do not
+  regress.
+- A *Quality dimensions* line in the Step 4 plan entry and a *Build quality*
+  column + *Comments read* / *Open build-quality items* / *Framework versions*
+  / *Framework opportunities* lines in the Step 7 summary.
+
+### Changed
+
+- **`fetch_comments_mode: when_needed` always reads the newest comment.** The
+  skill's own rule is that the last comment is the freshest truth; skipping it
+  on well-described tasks implemented an outdated spec, because a comment can
+  change the task after the description was written. The probe that counts
+  comments returns the newest one in the same call, so this costs nothing
+  extra. The existing heuristics (no final summary, short acceptance criteria,
+  *"viď komentár"*) now only decide whether the **full thread** is fetched.
+  `always` and `never` are unchanged (`never` skips the probe too). The plan's
+  *Comments context* line states exactly what was read.
+- Subtask expansion reuses the names / descriptions from the subtasks response
+  instead of one extra `GET` per child, calls the `parentTaskId=` fallback only
+  when the primary endpoint fails, and does not expand a parent whose subtasks
+  are all completed (with `skip_completed_tasks=true`).
+- Step 3.42's per-task subtask GETs retry HTTP 429 / 5xx
+  (`curl --retry 3 --retry-max-time 120`, body written to a file so retried
+  bodies are not concatenated). A big tasklist fires one request per task and
+  can hit Teamwork's rate limit — observed while verifying this release — and
+  a rate-limited parent must not quietly lose its subtasks; whatever still
+  fails after the retries is named in a `⚠` line.
+- **Start columns: *Ready for Development* and *To Do*.** The shared WAME
+  board (Teamwork workflow *"WAME workflow"*, ~49 projects) greenlights
+  work in two columns. The tasklist filter now implements a task whose column
+  is **any** of the new `tasklist_filter.todo_stages` (default
+  `["Ready for Development", "To Do"]`; the order is only the display order),
+  each matched per `todo_stage_match_mode` (case-sensitive by default) — plus
+  the assignee rule as before. The legacy string `todo_stage` is still read
+  when the list is absent, and `--tasklist-todo-stage` accepts a
+  comma-separated list. The plan banner, the empty-result message, the Step
+  4.0a prompt (*Change the start columns*) and the final summary name the
+  configured columns instead of a hard-coded *To Do*. Older boards without
+  *Ready for Development* keep working with *To Do*.
+- **A task that is not on the board is analyse-only.** Only the start
+  columns are greenlit work, so a backlog item nobody moved onto the board —
+  or any task of a project without a workflow — is no longer implemented from
+  a tasklist run: the plan lists it as *"not on the board"* (`no_card`) and
+  the user can promote it. This replaces the `no_card → process` rule 1.3.0
+  documented (it never took effect, because the column lookup was broken —
+  see *Fixed*), for tasks and subtasks alike. A column that cannot be named
+  because a GET failed stays fail-closed (`stage_unresolved`).
+- **Done target: *Done - Local*.** The WAME board ends local work in *Done -
+  Local*; `board_workflow.done_stage` now defaults to it, with
+  `done_stage_fallbacks` `["Internal testing", "Testing"]`, so the older
+  boards keep landing where they did. `in_progress_stage` stays
+  `"In progress"` — the case-insensitive match resolves *In Progress* on the
+  new board. Plan (*Board target*), Step 6.8.5 and the final summary name the
+  resolved column. Verified with GET only: the defaults resolve to *Ready for
+  Development* 300980, *To Do* 300903, *In Progress* 300904 and *Done - Local*
+  301170 on project 736882 (workflow 59165), and to *To Do* 295925,
+  *In progress* 295926 and — via the fallbacks — *Testing* 295928 on project
+  700336 (workflow 58171); the Step 3 → 3.3 → 3.45 snippets ran end-to-end on
+  tasklists 3367748 and 3361804 in zsh and bash with identical results.
+- **Board-column migration (Step 2.6), only from the old defaults.**
+  `board_workflow.done_stage` moves to `"Done - Local"` only when it equals
+  the old default `"Internal testing"`; the fallbacks then become
+  `["Internal testing", …the existing fallbacks minus "Done - Local"…]`
+  (deduplicated, `"Testing"` kept). A customised `done_stage` is never
+  touched, and a new `board_workflow.done_stage_schema: 2` marker makes the
+  check one-shot, so choosing *Internal testing* again later sticks.
+  `tasklist_filter.todo_stages` is written once, only when missing: the
+  default pair when the legacy `todo_stage` was missing or `"To Do"`,
+  `[<custom>]` otherwise; an existing list is never overwritten and the
+  legacy key stays for older sibling plugins. The config shape in use at WAME
+  today (`done_stage: "Internal testing"`, fallbacks
+  `["Done - Local", "Testing"]`, `todo_stage: "To Do"`) becomes
+  `done_stage: "Done - Local"`, fallbacks `["Internal testing", "Testing"]`,
+  `todo_stages: ["Ready for Development", "To Do"]`. Verified on scratch
+  copies in zsh and bash — that shape, a fresh config, the 1.4.2 default,
+  customised values, disabled and missing blocks — each unchanged by a second
+  run.
+- **A completed task behind a single-task URL asks first.**
+  `skip_completed_tasks` keeps dropping completed tasks silently from
+  tasklist and subtask iteration. A URL the user pasted keeps its task, and
+  the new Step 3.35 asks whether to process it — *Skip* (recommended,
+  default) or *Process anyway* — naming the task's current column and warning
+  that processing moves the card out of the done column (to *In progress*,
+  then to the done target) and logs time on a completed task. Why: pasting a
+  finished task is as often a mistake as a rework request, and doing either
+  silently is wrong half the time.
+- Config migration banner reads "1.5.0 schema".
+
+---
+
 ## [1.4.2] - 2026-06-11
 
 ### Fixed
