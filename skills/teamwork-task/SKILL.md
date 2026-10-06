@@ -1,7 +1,7 @@
 ---
 name: teamwork-task
 description: "Use when the user provides a Teamwork.com URL (tasklist or task) and asks to 'work on these tasks', 'urob tasky z teamworku', 'spracuj tasky z teamwork', 'vypracuj tasky z teamworku', or invokes '/teamwork-task'. Fetches tasks via the Teamwork REST API (v3), pulls task description, attachments, comments (always the newest one, the full thread when needed), and file comments for context, **scans the local working tree for unattached specs / samples / DNR docs that match the task keywords and asks the user whether to use them**, **detects gating phrases in the task body (e.g. 'Bez vzorky nemá zmysel písať regex') and pauses with a question before implementing instead of barreling through with synthetic data**, implements tasks one by one in the current repository (planning and self-checking each one against five build-time quality dimensions — UI/UX & accessibility, performance, security, page reachability: every new screen gets its menu entry and inbound links in the same commit — and framework best practices: new or changed code uses the current idioms and built-in features of the framework / language versions the project actually has installed, detected from its lock files and looked up in current docs, never newer than installed and never as a drive-by rewrite), moves the task on the board (In progress → Done - Local, with fallbacks Internal testing → Testing), commits per task using the TYPE(scope)[<task-id>]: Message convention, and logs time back to Teamwork as sequential, non-overlapping 5-min-aligned entries that pick up from your last timelog of the day. **For tasklist URLs the skill applies a board-column + assignee filter — only tasks in one of the start columns (`Ready for Development` or `To Do` by default, exact case-sensitive match) AND assigned to the current user are actually implemented; tasks not on the board and every other task in the tasklist are still fetched, analysed, and briefly commented on so the developer can sanity-check teammates' work without touching it. Single-task URLs deliberately bypass the filter (a completed task is only processed after the user confirms).** Configurable safety gate asks for review when the diff touches UI/template files or grows beyond 100 lines. When the companion `teamwork-task-test` skill is installed, hands off to it at the very end so each task's acceptance criteria get individually verified before the user pushes. Pauses and asks the user via AskUserQuestion on blockers."
-argument-hint: "<teamwork-url> [--time-mode=real_rounded_5m|ask] [--branching=current_branch|new_feature_branch] [--plan-mode=overview|per_task|none] [--auto-commit=always|when_safe|never] [--local-discovery=true|false] [--readiness-gate=true|false] [--test-after=true|false] [--worktree-cleanup=true|false|ask] [--worktree-handoff=ask|merge|push|leave] [--worktree-target=ask|parent|main|<branch>] [--tasklist-filter=true|false] [--tasklist-todo-stage=<name>[,<name>…]] [--tasklist-only-mine=true|false] [--subtasks=true|false] [--dimensions=ui_ux,performance,security,reachability,framework|none]"
+argument-hint: "<teamwork-url> [--time-mode=real_rounded_5m|ask] [--branching=current_branch|new_feature_branch] [--plan-mode=overview|per_task|none] [--auto-commit=always|when_safe|never] [--local-discovery=true|false] [--readiness-gate=true|false] [--test-after=true|false] [--worktree-cleanup=true|false|ask] [--worktree-handoff=ask|merge|push|leave] [--worktree-target=ask|parent|main|<branch>] [--tasklist-filter=true|false] [--tasklist-todo-stage=<name>[,<name>…]] [--tasklist-only-mine=true|false] [--subtasks=true|false] [--dimensions=ui_ux,performance,security,reachability,framework|none] [--mode=build|harden]"
 allowed-tools: [Bash, Read, Write, Edit, Grep, Glob, AskUserQuestion, Skill]
 ---
 
@@ -84,7 +84,7 @@ Optional flags (override config for this run only — not persisted):
 - `--auto-commit=always` | `--auto-commit=when_safe` | `--auto-commit=never`
 - `--local-discovery=true|false` — scan the working tree for unattached spec/sample files matching task keywords (default `true`, see Step 3.10)
 - `--readiness-gate=true|false` — pause with a question when a task body says it needs an external input that may not yet be available (default `true`, see Step 6.0)
-- `--test-after=true|false` — hand off to `/teamwork-task-test` after a clean finish (default `true`)
+- `--test-after=true|false` — hand off to `/teamwork-task-test` after a clean finish (default `true`; `false` in `build` mode)
 - `--worktree-cleanup=true|false|ask` — at end of run, scan the repo for other worktrees and offer to remove ones that are merged & clean (default `true`, see Step 10)
 - `--worktree-handoff=ask|merge|push|leave` — when running inside a worktree, decide at the end of the run what to do with the worktree's commits (default `ask`, see Step 9.5). `merge` = fast-forward into parent, fall back to merge commit if FF impossible; `push` = push current branch to remote and leave for a PR; `leave` = no-op.
 - `--worktree-target=ask|parent|main|<branch>` — when `--worktree-handoff=merge`, decide where to merge into (default `ask`).
@@ -93,6 +93,7 @@ Optional flags (override config for this run only — not persisted):
 - `--tasklist-only-mine=true|false` — override `tasklist_filter.only_assigned_to_me` for this run (default `true`).
 - `--subtasks=true|false` — override `subtasks.enabled` for this run (default `true`, see Step 3.42).
 - `--dimensions=<csv>|none` — which build-time quality dimensions to plan (Step 6.2), follow (Step 6.3) and self-check (Step 6.5.5). Any subset of `ui_ux,performance,security,reachability,framework` (the same keys `/teamwork-task-test` reviews in its Step 6.6 — `framework` there as advisory recommendations only), or `none` to skip them (default: `config.build_quality.dimensions`, all five). Unknown keys are dropped with a `⚠` line.
+- `--mode=build|harden` — work mode for this run (default: resolved in Step 2.65 — the project's `.claude/wame-mode.local.md`, then `config.mode`, then `harden`). `build` builds fast: the quality dimensions, the test proposal, the per-task test run and Pint, browser checks and the `/teamwork-task-test` handoff are all off at once, and every skipped check is recorded for `/wame-harden`. `harden` keeps every check exactly as before. An explicit individual flag (`--dimensions=…`, `--test-after=…`) still wins over the mode.
 
 If `$ARGUMENTS` is empty or does not contain a URL, ask the user via **AskUserQuestion** for the Teamwork URL before doing anything else.
 
@@ -151,7 +152,7 @@ Algorithm:
    chmod 600 "$CONFIG_FILE"
    ```
 
-6. **Apply CLI flag overrides** to in-memory config (`--time-mode`, `--branching`, `--plan-mode`, `--auto-commit`, `--dimensions`, …) — do not persist them. `--dimensions=none` means an empty active set; `--dimensions=ui_ux,security` keeps only the listed known keys.
+6. **Apply CLI flag overrides** to in-memory config (`--time-mode`, `--branching`, `--plan-mode`, `--auto-commit`, `--dimensions`, `--mode`, …) — do not persist them. Resolve the work mode (Step 2.65) first and apply the individual flags after it, so an explicit flag wins over what `build` implies. `--dimensions=none` means an empty active set; `--dimensions=ui_ux,security` keeps only the listed known keys.
 
 7. **Never echo the API token** in shell output. When invoking `curl`, pass auth via `-u` to keep it out of `ps`.
 
@@ -173,6 +174,7 @@ fi
 # Fill in any new key that the user has not set explicitly
 jq '
   (.plan_mode //= "overview") |
+  (.mode //= "harden") |
   (.fetch_comments_mode //= "when_needed") |
   (.fetch_attachments |= if . == null then true else . end) |
   (.fetch_file_comments |= if . == null then true else . end) |
@@ -397,6 +399,8 @@ default and only while `done_stage_schema` is absent, then set it to `2` —
 so the file ends in the same state whichever plugin runs first, and none of
 them rewrites a value the user chose.
 
+The `mode` key (added in 1.6.0, `"harden"` by default) is the persistent work mode — `"build"` turns the quality dimensions, the test proposal, the per-task tests and Pint and the `/teamwork-task-test` handoff off at once; see Step 2.65. A project's `.claude/wame-mode.local.md` wins over it, `--mode=` wins over both.
+
 The `auto_run_tests_after` key (added in 1.1.1) controls whether this skill, on a clean finish, hands off to `/teamwork-task-test` to verify the acceptance criteria of every implemented task. Default is `true`. Disable per run with `--test-after=false`.
 
 The `local_context_discovery` key (added in 1.1.3) controls Step 3.10 — scanning the working tree for unattached specs / samples that the user dropped into the project folder but did not attach to the Teamwork task. Default is `true`. Disable per run with `--local-discovery=false`.
@@ -479,6 +483,77 @@ chains into Step 10 cleanup without re-asking. Disable per run with
 `"worktree_handoff": {"enabled": false}`. Power users can preset
 `default_action=merge` (skip the first question) and/or
 `default_target=parent` (skip the target question) for unattended runs.
+
+---
+
+## Step 2.65 — Work mode: build vs. harden (v1.6.0)
+
+Most of a run's wall-clock time used to go to verification, not to building:
+the five-dimension plan and self-check, a proposed test file per task, a
+filtered test run and Pint per task, browser checks and finally the whole
+`/teamwork-task-test` pass — on every task. The work mode lets the user defer
+all of that to **one** explicit hardening pass at the end of a feature.
+
+**Resolution order** (first hit wins):
+1. `--mode=build|harden` on the command line;
+2. the project's `.claude/wame-mode.local.md` YAML frontmatter `mode:` —
+   written by `/wame-mode` from the `wame-work-mode` plugin, so one switch
+   drives every WAME plugin in that project;
+3. `config.mode` in the shared config (`"harden"` by default);
+4. `harden`.
+
+```bash
+WORK_MODE="<value of --mode, or empty>"
+if [ -z "$WORK_MODE" ] && [ -f .claude/wame-mode.local.md ]; then
+  WORK_MODE=$(sed -n '/^---$/,/^---$/{s/^mode:[[:space:]]*//p;}' .claude/wame-mode.local.md \
+    | head -n 1 | tr -d "\"' \r")
+fi
+[ -z "$WORK_MODE" ] && WORK_MODE=$(jq -r '.mode // empty' "$CONFIG_FILE")
+case "$WORK_MODE" in build|harden) ;; *) WORK_MODE=harden ;; esac
+echo "WORK_MODE=$WORK_MODE"
+```
+
+Remember `WORK_MODE` like `USER_ID` and write it literally into later snippets.
+
+**What `build` switches off at once** (in memory only — the config file is
+never rewritten):
+
+| Switch | `harden` (default) | `build` |
+|---|---|---|
+| Quality dimensions (Steps 6.2 / 6.5.5) | `config.build_quality.dimensions` | `[]` — same as `--dimensions=none` |
+| Test proposal (Step 6.2.5) | `config.auto_propose_tests` | `false` |
+| Per-task test run (Step 6.4) and Pint (Step 6.5) | run | skipped |
+| `/teamwork-task-test` handoff (Step 8) | `config.auto_run_tests_after` | `false` — same as `--test-after=false` |
+| Browser / click-through checks, docs and version lookups | as the steps say | skipped |
+
+An explicit individual flag still wins: `--mode=build --dimensions=security`
+keeps the security self-check, `--mode=build --test-after=true` still hands
+off to QA. Build mode skips **verification, not bookkeeping** — fetching,
+the readiness gate, the plan approval, board moves, the safety gate, one
+commit per task and the time logs all run as usual.
+
+**Deferred list.** In `build` mode, right after each task's commit (Step 6.7)
+append one block to the project's `.claude/wame-deferred.local.md` (create it
+when missing):
+
+```markdown
+## [<task-id>] <task title> — <YYYY-MM-DD HH:MM> — <commit hash>
+- Files: <paths in the commit>
+- Screens: <URLs / Nova resources the change shows up on, or none>
+- Skipped: dimensions, test proposal, tests, Pint, QA handoff
+```
+
+`/wame-harden` (plugin `wame-work-mode`) reads this file, runs the skipped
+checks once, fixes what they find and clears it. Never stage or commit the
+file; if the project's `.gitignore` does not cover `.claude/*.local.md`, print
+one `⚠` line saying so.
+
+**Browser tooling rule (every mode).** Never install or uninstall Playwright,
+Puppeteer or Laravel Dusk for a single run. Use the chrome-devtools MCP or the
+runner the project already has. When a check needs a runner the project
+lacks, ask the user **once**; on yes, install it permanently as a committed
+dev dependency and never remove it afterwards; on no, write a manual
+checklist instead.
 
 ---
 
@@ -2647,7 +2722,8 @@ concrete step for each one that applies. The keys are exactly the ones
 in mind is cheaper than having QA find the gap after the commit. The active
 set is `config.build_quality.dimensions` (default all five) or the
 `--dimensions=` override; `none` / `[]` skips this block and Step 6.5.5, and
-the final summary says `skipped (--dimensions=none)`.
+the final summary says `skipped (--dimensions=none)`. In `build` mode
+(Step 2.65) the active set is `[]` unless `--dimensions=` names keys explicitly.
 
 Decide from the **shape of the planned change**, not from the task's wording —
 but a `### Prierezové požiadavky` / `### Cross-cutting requirements` block in the
@@ -2837,7 +2913,8 @@ the choice was non-obvious.
 
 ### 6.2.5 Test strategy — propose tests when none are specified
 
-If `config.auto_propose_tests == true` (default) and the task does **not**
+If `config.auto_propose_tests == true` (default), the work mode is not
+`build` (Step 2.65 forces it `false`), and the task does **not**
 already specify a testing strategy, the skill proposes a concrete test plan
 and implements it alongside the code change. This guards against the common
 trap where a Teamwork ticket says only *"add PDF export to invoice"* and
@@ -2901,25 +2978,29 @@ Match to the available framework:
 | Project signal           | Visual change                                                   | Backend change                                                            |
 | ------------------------ | --------------------------------------------------------------- | ------------------------------------------------------------------------- |
 | Laravel + Dusk installed | Laravel Dusk (`tests/Browser/…`)                                | Pest if `HAS_PEST`, else PHPUnit (`tests/Feature/…`, `tests/Unit/…`)      |
-| Laravel without Dusk     | Propose Dusk install, otherwise skip browser tests (see prompt) | Pest if `HAS_PEST`, else PHPUnit                                          |
+| Laravel without Dusk     | Ask once to add Dusk permanently, else a manual checklist       | Pest if `HAS_PEST`, else PHPUnit                                          |
 | PHP without Laravel      | Selenium standalone PHPUnit test, otherwise skip                | PHPUnit or Pest by signal                                                 |
 | JS with Playwright       | Playwright (`tests/e2e/…`)                                      | Vitest if `HAS_VITEST`, Jest if `HAS_JEST`                                |
 | JS with Cypress          | Cypress (`cypress/e2e/…`)                                       | Vitest or Jest                                                            |
-| JS without any browser   | Propose Playwright install, otherwise skip                      | Vitest or Jest by signal                                                  |
+| JS without any browser   | Ask once to add Playwright permanently, else manual checklist   | Vitest or Jest by signal                                                  |
 | Nothing detected         | Plan a manual checklist instead                                 | Plan a manual checklist instead                                           |
 
 `config.test_frameworks.*_preference` lets the user pin a choice (`pest`,
 `phpunit`, `dusk`, `playwright`, `cypress`, `vitest`, `jest`,
 `selenium`); the default `"auto"` follows the table.
 
-**Missing tool — ask, don't auto-install**
+**Missing tool — ask once, install permanently, never on the fly**
 
-If the chosen framework is **not present** in the project (e.g. visual change
-in Laravel but no Dusk), use **AskUserQuestion** with three options:
+Never install or uninstall Playwright, Puppeteer or Laravel Dusk just for this
+run. For a visual check prefer the chrome-devtools MCP or the runner the
+project already has. If the chosen framework is **not present** in the project
+(e.g. visual change in Laravel but no Dusk), use **AskUserQuestion** **once per
+run** — the answer holds for every later task — with three options:
 
-- *Install `<package>` now* — run the install command and continue
-  (`composer require --dev laravel/dusk && php artisan dusk:install` /
-  `npm install -D @playwright/test && npx playwright install --with-deps`).
+- *Add `<package>` to the project permanently* — install it as a committed dev
+  dependency (`composer require --dev laravel/dusk && php artisan dusk:install` /
+  `npm install -D @playwright/test && npx playwright install`), commit the
+  manifest and lock-file changes with the task, and never remove it afterwards.
 - *Skip browser tests, write a manual checklist* — emit the checklist into
   the plan and proceed without a browser test file. This is the safe
   default.
@@ -3012,13 +3093,16 @@ this block before the timer starts.
   `cypress/e2e/…` for JS).
 
 ### 6.4 Test
+Skipped in `build` mode (Step 2.65) unless `--test-after=true` or a task
+explicitly asks for tests — the deferred list records it instead.
 If the project has a test suite and the change is testable:
 - Laravel/Pest: `php artisan test --compact --filter=<RelevantTest>`
 - Generic JS: `npm test -- --watchAll=false <pattern>` (or whatever the project uses)
 - Run only what is relevant — do not run the whole suite per task.
 
 ### 6.5 Format
-If PHP files changed: `vendor/bin/pint --dirty --format agent`.
+If PHP files changed: `vendor/bin/pint --dirty --format agent`. Skipped in
+`build` mode (Step 2.65) — `/wame-harden` runs the formatter once at the end.
 
 ### 6.5.5 Quality self-check (v1.5.0)
 
@@ -3368,6 +3452,9 @@ EOF
 
 Capture the commit hash for the time log and final summary: `COMMIT_HASH=$(git rev-parse --short HEAD)`.
 
+In `build` mode, now append the task's block to `.claude/wame-deferred.local.md`
+(Step 2.65) — never stage that file.
+
 Examples:
 ```
 CREATE(user)[123456]: Create user module
@@ -3541,6 +3628,7 @@ Followed by a short status block:
 ```
 Time cursor: <TIME_CURSOR_SOURCE>           e.g. "last_timelog @ 10:50"
                                             or  "skill start (first log of day)"
+Work mode (Step 2.65):                        <harden | build — N task(s) recorded in .claude/wame-deferred.local.md; run /wame-harden before pushing>
 Tasklist filter:                              <start columns <TF_TODO_LABEL> + me — N implemented, M analyse-only (K not on the board), L dropped> | <disabled / single-task URL>
 Analyse-only tasks (not touched):             <list of [#id] title from ANALYSE_ONLY_TASKS or none>
 Timelogs skipped (cursor caught up with now): <list from SKIPPED_TIMELOGS or none>
@@ -3569,7 +3657,9 @@ The push reminder is intentionally **not** printed here — it moves to Step 9, 
 
 ## Step 8 — Auto-run `/teamwork-task-test` (optional handoff)
 
-If `config.auto_run_tests_after == true` (default, added in 1.1.1) and the user did not pass `--test-after=false`, hand off to the `/teamwork-task-test` skill for per-criterion verification.
+**Check the work mode first (v1.6.0).** When `WORK_MODE=build` (Step 2.65) and the user did not pass `--test-after=true`, skip this whole step: print `ℹ Build mode — /teamwork-task-test not run; /wame-harden runs the deferred checks once.` and go to Step 9. When the handoff does run in `build` mode (explicit `--test-after=true`), append `--mode=harden` to `TEST_ARGS` in Step 8.2 so the QA pass does not inherit the project's build mode.
+
+Otherwise, if `config.auto_run_tests_after == true` (default, added in 1.1.1) and the user did not pass `--test-after=false`, hand off to the `/teamwork-task-test` skill for per-criterion verification.
 
 **Why this exists.** The implementation phase produces a passing build and a commit per task, but it does not — by itself — prove that each *acceptance criterion* of the original Teamwork task was actually met. The companion `teamwork-task-test` skill exists precisely for that: it parses each acceptance criterion out of the task description, maps it onto the project's existing tests, runs them, drives a browser via the chrome-devtools MCP for UI-shaped criteria, and writes manual scenarios for whatever cannot be automated. Calling it automatically at the end closes the implement → verify loop in a single command.
 

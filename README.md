@@ -10,9 +10,16 @@ entries. Push to remote is intentionally left to the user.
 
 Part of the [`wame`](https://github.com/wamesk/claude-code) Claude Code plugin marketplace.
 
-**Current version:** 1.5.0 — see [`CHANGELOG.md`](CHANGELOG.md) for the full release history.
+**Current version:** 1.6.0 — see [`CHANGELOG.md`](CHANGELOG.md) for the full release history.
 
 ---
+
+## What's new in 1.6.0
+
+- **Work modes: build fast, harden once.** Agents used to spend most of a run verifying instead of building — the quality dimensions, a proposed test per task, a test run and Pint per task, browser checks and the whole `/teamwork-task-test` pass on every task. `--mode=build` (or `"mode": "build"` in the config, or `mode: build` in the project's `.claude/wame-mode.local.md` written by `/wame-mode` from the [`wame-work-mode`](https://github.com/wamesk/claude-code-plugin-wame-work-mode) plugin) switches all of that off at once — the same as `--dimensions=none --test-after=false` plus `auto_propose_tests: false`, no per-task tests / Pint and no browser work. Each committed task is recorded in `.claude/wame-deferred.local.md`, and `/wame-harden` runs every skipped check once at the end. Fetching, board moves, commits and time logs run as usual. `harden` (default) behaves exactly like 1.5.0; an explicit individual flag still wins over the mode. Resolution order: `--mode` > `.claude/wame-mode.local.md` > `config.mode` > `harden`. See [Work modes](#work-modes-v160).
+- **No more browser tooling installed on the fly.** The skill never installs or uninstalls Playwright, Puppeteer or Dusk for a single run. It uses the chrome-devtools MCP or the runner the project already has; a missing runner is asked about **once**, and on yes it is installed permanently as a committed dev dependency.
+
+The 1.6.0 migration only adds `"mode": "harden"` to your config — nothing changes until you choose `build`.
 
 ## What's new in 1.5.0
 
@@ -141,6 +148,7 @@ Optional flags (override the saved config **for this run only**, not persisted):
 - `--worktree-target=ask|parent|main|<branch>` — when `--worktree-handoff=merge`, decide the target branch (default `ask`).
 - `--subtasks=true|false` — **v1.4.0**, expand parent tasks into their subtasks (default `true`).
 - `--dimensions=<csv>|none` — **v1.5.0**, which build-time quality dimensions to plan and self-check: any subset of `ui_ux,performance,security,reachability,framework`, or `none` (default: `build_quality.dimensions`, all five). See [Build-time quality](#build-time-quality-v150).
+- `--mode=build|harden` — **v1.6.0**, work mode for this run (default: `.claude/wame-mode.local.md`, then `mode`, then `harden`). `build` = no quality dimensions, no test proposal, no per-task tests / Pint, no browser work and no `/teamwork-task-test` handoff; skipped checks go to `.claude/wame-deferred.local.md` for `/wame-harden`. See [Work modes](#work-modes-v160).
 
 ## What the plugin does, step by step
 
@@ -186,6 +194,7 @@ File: `~/.claude/plugins/data/teamwork-task-wamesk/config.json`
 | `teamwork.base_url`                       | `https://<workspace>.teamwork.com`                                       | Your Teamwork workspace URL. Asked on first run.                                                                                                                                       |
 | `teamwork.api_token`                      | (empty)                                                                  | Personal API key. Asked on first run. Stored at chmod 0600.                                                                                                                            |
 | `plan_mode`                               | `overview`                                                               | `overview` (one approval for the whole tasklist), `per_task` (approval before each task), or `none`.                                                                                   |
+| `mode`                                    | `harden`                                                                 | **v1.6.0** — work mode. `build` = `build_quality.dimensions: []`, `auto_run_tests_after: false`, `auto_propose_tests: false`, no per-task tests / Pint / browser work; skipped checks recorded for `/wame-harden`. Project `.claude/wame-mode.local.md` wins; per run: `--mode=`. See [Work modes](#work-modes-v160). |
 | `fetch_comments_mode`                     | `when_needed`                                                            | `always`, `when_needed` (default), or `never`. `when_needed` always reads the newest comment and fetches the full thread only when the description is thin. See [Fetching comments](#fetching-comments). |
 | `fetch_attachments`                       | `true`                                                                   | If `true`, task and comment file attachments are downloaded into `./teamwork-task-<id>/`.                                                                                              |
 | `fetch_file_comments`                     | `true`                                                                   | If `true`, comments attached to file objects are fetched and surfaced in the plan.                                                                                                     |
@@ -446,6 +455,19 @@ On the QA side `/teamwork-task-test` (1.2.0+) treats `framework` as **advisory**
 `build_quality.dimensions_schema` records which key set your list was last reconciled with (absent = a four-key list from a pre-release 1.5.0 build; `2` = five keys). The Step 2.6 migration adds `framework` **once**, and only when the marker is absent and the list is exactly `ui_ux`, `performance`, `security`, `reachability` (each once, any order) — such a list cannot be told apart from the untouched old default. Every other list counts as customised and is left untouched: a subset, `[]`, a list that already names `framework`, or one with other keys. A missing list gets the five-key default. Afterwards the marker is `2`, so if you remove `framework` from the list it stays removed on every later run.
 
 
+## Work modes (v1.6.0)
+
+| | `harden` (default) | `build` |
+|---|---|---|
+| Quality dimensions (Steps 6.2 / 6.5.5) | `build_quality.dimensions` | none (`--dimensions=none`) |
+| Auto-proposed tests (Step 6.2.5) | `auto_propose_tests` | off |
+| Per-task tests (6.4) and Pint (6.5) | run | skipped |
+| Browser checks, docs / version lookups | as configured | skipped |
+| `/teamwork-task-test` handoff (Step 8) | `auto_run_tests_after` | off (`--test-after=false`) |
+| Fetching, board moves, commits, time logs | run | run |
+
+Resolution: `--mode=` > the project's `.claude/wame-mode.local.md` frontmatter `mode:` (written by `/wame-mode`, plugin `wame-work-mode`) > `mode` in the shared config > `harden`. An explicit `--dimensions=` or `--test-after=true` still wins over `build`. In `build` mode every committed task appends its files, screens and skipped checks to `.claude/wame-deferred.local.md` (never committed); `/wame-harden` runs those checks once — tests, Pint, the quality self-check, security and code review, one visual pass — and clears the list.
+
 ## Attachments
 
 When `fetch_attachments=true` (default), the plugin downloads:
@@ -498,20 +520,20 @@ For `missing`, the skill sniffs `composer.json` and `package.json` for installed
 | Project signal           | Visual change (`.vue` / `.tsx` / `.blade.php` / `resources/views/…`) | Backend change                         |
 | ------------------------ | -------------------------------------------------------------------- | -------------------------------------- |
 | Laravel + Dusk installed | Laravel Dusk in `tests/Browser/`                                    | Pest if installed, else PHPUnit         |
-| Laravel without Dusk     | Ask to install Dusk **or** write manual checklist                    | Pest if installed, else PHPUnit         |
+| Laravel without Dusk     | Ask once to add Dusk permanently **or** write manual checklist       | Pest if installed, else PHPUnit         |
 | PHP without Laravel      | Selenium standalone PHPUnit **or** manual checklist                  | Pest if installed, else PHPUnit         |
 | JS with Playwright       | Playwright in `tests/e2e/`                                          | Vitest if installed, else Jest          |
 | JS with Cypress          | Cypress in `cypress/e2e/`                                           | Vitest if installed, else Jest          |
-| JS without any browser   | Ask to install Playwright **or** manual checklist                    | Vitest if installed, else Jest          |
+| JS without any browser   | Ask once to add Playwright permanently **or** manual checklist       | Vitest if installed, else Jest          |
 | Nothing detected         | Manual checklist                                                     | Manual checklist                        |
 
 `test_frameworks.*_preference` lets you pin a specific choice (e.g. force `pest` even if PHPUnit is also present, or force `playwright` over a coexisting `cypress`). The default `"auto"` follows the table.
 
-**Missing tool — ask, never auto-install**
+**Missing tool — ask once, install permanently, never on the fly**
 
-When the chosen framework is not installed (e.g. a visual change in a Laravel project without Dusk), the skill **never** runs `composer require` or `npm install` silently. It asks via `AskUserQuestion`:
+The skill never installs or uninstalls Playwright, Puppeteer or Dusk for a single run; it prefers the chrome-devtools MCP or the runner the project already has. When the chosen framework is not installed (e.g. a visual change in a Laravel project without Dusk), it asks **once per run** via `AskUserQuestion`:
 
-- **Install `<package>` now** — runs the install command and continues.
+- **Add `<package>` to the project permanently** — installs it as a committed dev dependency and never removes it afterwards.
 - **Skip browser tests, write a manual checklist** — proceeds without a test file; the checklist is emitted into the plan.
 - **Abort the task** — leaves the working tree as-is.
 

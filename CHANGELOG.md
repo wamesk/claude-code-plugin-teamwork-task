@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.6.0] - 2026-10-06
+
+Most of a run went to verification instead of building: the five quality
+dimensions, a proposed test per task, a filtered test run and Pint per task,
+browser checks and the whole `/teamwork-task-test` pass — on every task. Models
+also improvised installing and uninstalling Playwright / Puppeteer for a single
+check. 1.6.0 adds a **build** work mode that defers all of it to one explicit
+`/wame-harden` pass, and a fixed rule for browser tooling.
+
+### Added
+
+- **`--mode=build|harden` and the `mode` config key** (default `"harden"`,
+  added by the Step 2.6 migration). New Step 2.65 resolves the mode — `--mode`
+  > the project's `.claude/wame-mode.local.md` frontmatter `mode:` (written by
+  `/wame-mode`, plugin `wame-work-mode`) > `config.mode` > `harden`. `build`
+  maps onto the existing switches at once, in memory only:
+  `build_quality.dimensions: []` (= `--dimensions=none`),
+  `auto_run_tests_after: false` (= `--test-after=false`),
+  `auto_propose_tests: false`, no per-task test run (6.4) or Pint (6.5), no
+  browser work and no docs / version lookups. An explicit individual flag
+  still wins over the mode. Fetching, the readiness gate, plan approval, board
+  moves, commits and time logs are unchanged.
+- **Deferred list.** In `build` mode each task appends its commit, files,
+  screens and skipped checks to `.claude/wame-deferred.local.md` right after
+  Step 6.7 (never staged); Step 7 prints a *Work mode* line pointing to
+  `/wame-harden`.
+
+### Changed
+
+- **Step 8 checks the work mode first.** In `build` mode the
+  `/teamwork-task-test` handoff is skipped unless `--test-after=true` is
+  passed, in which case `--mode=harden` is forwarded so QA does not inherit
+  the project's build mode.
+- **Browser tooling is never installed on the fly.** Step 6.2.5's *"Install
+  `<package>` now"* became *"Add `<package>` to the project permanently"*:
+  asked once per run, installed as a committed dev dependency and never removed
+  afterwards; the chrome-devtools MCP or the project's own runner is preferred.
+  `npx playwright install` no longer passes `--with-deps`.
+
+---
+
 ## [1.5.0] - 2026-09-24
 
 The skill could report *"task has no comments"* on a task with eight — and

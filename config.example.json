@@ -4,6 +4,7 @@
     "api_token": ""
   },
   "plan_mode": "overview",
+  "mode": "harden",
 
   "fetch_comments_mode": "when_needed",
   "fetch_attachments": true,
