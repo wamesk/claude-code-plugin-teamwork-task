@@ -1,7 +1,7 @@
 ---
 name: teamwork-task
 description: "Use when the user provides a Teamwork.com URL (tasklist or task) and asks to 'work on these tasks', 'urob tasky z teamworku', 'spracuj tasky z teamwork', 'vypracuj tasky z teamworku', or invokes '/teamwork-task'. Fetches tasks via the Teamwork REST API (v3), pulls task description, attachments, comments (always the newest one, the full thread when needed), and file comments for context, **scans the local working tree for unattached specs / samples / DNR docs that match the task keywords and asks the user whether to use them**, **detects gating phrases in the task body (e.g. 'Bez vzorky nemá zmysel písať regex') and pauses with a question before implementing instead of barreling through with synthetic data**, implements tasks one by one in the current repository (planning and self-checking each one against five build-time quality dimensions — UI/UX & accessibility, performance, security, page reachability: every new screen gets its menu entry and inbound links in the same commit — and framework best practices: new or changed code uses the current idioms and built-in features of the framework / language versions the project actually has installed, detected from its lock files and looked up in current docs, never newer than installed and never as a drive-by rewrite), moves the task on the board (In progress → Done - Local, with fallbacks Internal testing → Testing), commits per task using the TYPE(scope)[<task-id>]: Message convention, and logs time back to Teamwork as sequential, non-overlapping 5-min-aligned entries that pick up from your last timelog of the day. **For tasklist URLs the skill applies a board-column + assignee filter — only tasks in one of the start columns (`Ready for Development` or `To Do` by default, exact case-sensitive match) AND assigned to the current user are actually implemented; tasks not on the board and every other task in the tasklist are still fetched, analysed, and briefly commented on so the developer can sanity-check teammates' work without touching it. Single-task URLs deliberately bypass the filter (a completed task is only processed after the user confirms).** Configurable safety gate asks for review when the diff touches UI/template files or grows beyond 100 lines. When the companion `teamwork-task-test` skill is installed, hands off to it at the very end so each task's acceptance criteria get individually verified before the user pushes. Pauses and asks the user via AskUserQuestion on blockers."
-argument-hint: "<teamwork-url> [--time-mode=real_rounded_5m|ask] [--branching=current_branch|new_feature_branch] [--plan-mode=overview|per_task|none] [--auto-commit=always|when_safe|never] [--local-discovery=true|false] [--readiness-gate=true|false] [--test-after=true|false] [--worktree-cleanup=true|false|ask] [--worktree-handoff=ask|merge|push|leave] [--worktree-target=ask|parent|main|<branch>] [--tasklist-filter=true|false] [--tasklist-todo-stage=<name>[,<name>…]] [--tasklist-only-mine=true|false] [--subtasks=true|false] [--dimensions=ui_ux,performance,security,reachability,framework|none] [--mode=build|harden]"
+argument-hint: "<teamwork-url> [--time-mode=real_rounded_5m|ask] [--branching=current_branch|new_feature_branch] [--plan-mode=overview|per_task|none] [--auto-commit=always|when_safe|never] [--local-discovery=true|false] [--readiness-gate=true|false] [--test-after=true|false] [--worktree-cleanup=true|false|ask] [--worktree-handoff=ask|merge|push|leave] [--worktree-target=ask|parent|main|<branch>] [--tasklist-filter=true|false] [--tasklist-todo-stage=<name>[,<name>…]] [--tasklist-only-mine=true|false] [--subtasks=true|false] [--dimensions=ui_ux,performance,security,reachability,framework|none] [--mode=fast|full]"
 allowed-tools: [Bash, Read, Write, Edit, Grep, Glob, AskUserQuestion, Skill]
 ---
 
@@ -84,7 +84,7 @@ Optional flags (override config for this run only — not persisted):
 - `--auto-commit=always` | `--auto-commit=when_safe` | `--auto-commit=never`
 - `--local-discovery=true|false` — scan the working tree for unattached spec/sample files matching task keywords (default `true`, see Step 3.10)
 - `--readiness-gate=true|false` — pause with a question when a task body says it needs an external input that may not yet be available (default `true`, see Step 6.0)
-- `--test-after=true|false` — hand off to `/teamwork-task-test` after a clean finish (default `true`; `false` in `build` mode)
+- `--test-after=true|false` — hand off to `/teamwork-task-test` after a clean finish (default `true`; `false` in `fast` mode)
 - `--worktree-cleanup=true|false|ask` — at end of run, scan the repo for other worktrees and offer to remove ones that are merged & clean (default `true`, see Step 10)
 - `--worktree-handoff=ask|merge|push|leave` — when running inside a worktree, decide at the end of the run what to do with the worktree's commits (default `ask`, see Step 9.5). `merge` = fast-forward into parent, fall back to merge commit if FF impossible; `push` = push current branch to remote and leave for a PR; `leave` = no-op.
 - `--worktree-target=ask|parent|main|<branch>` — when `--worktree-handoff=merge`, decide where to merge into (default `ask`).
@@ -93,7 +93,7 @@ Optional flags (override config for this run only — not persisted):
 - `--tasklist-only-mine=true|false` — override `tasklist_filter.only_assigned_to_me` for this run (default `true`).
 - `--subtasks=true|false` — override `subtasks.enabled` for this run (default `true`, see Step 3.42).
 - `--dimensions=<csv>|none` — which build-time quality dimensions to plan (Step 6.2), follow (Step 6.3) and self-check (Step 6.5.5). Any subset of `ui_ux,performance,security,reachability,framework` (the same keys `/teamwork-task-test` reviews in its Step 6.6 — `framework` there as advisory recommendations only), or `none` to skip them (default: `config.build_quality.dimensions`, all five). Unknown keys are dropped with a `⚠` line.
-- `--mode=build|harden` — work mode for this run (default: resolved in Step 2.65 — the project's `.claude/wame-mode.local.md`, then `config.mode`, then `harden`). `build` builds fast: the quality dimensions, the test proposal, the per-task test run and Pint, browser checks and the `/teamwork-task-test` handoff are all off at once, and every skipped check is recorded for `/wame-harden`. `harden` keeps every check exactly as before. An explicit individual flag (`--dimensions=…`, `--test-after=…`) still wins over the mode.
+- `--mode=fast|full` — work mode for this run (default: resolved in Step 2.65 — the project's `.claude/work-mode.local.md`, then the legacy `.claude/wame-mode.local.md`, then `full`). `fast` builds fast: the quality dimensions, the test proposal, the per-task test run and Pint, browser checks and the `/teamwork-task-test` handoff are all off at once, and every skipped check is recorded for `/work-mode full`. `full` keeps every check exactly as before. An explicit individual flag (`--dimensions=…`, `--test-after=…`) still wins over the mode. The pre-1.7.0 values `--mode=build` / `--mode=harden` are deprecated aliases of `fast` / `full` (one `⚠` line).
 
 If `$ARGUMENTS` is empty or does not contain a URL, ask the user via **AskUserQuestion** for the Teamwork URL before doing anything else.
 
@@ -152,7 +152,7 @@ Algorithm:
    chmod 600 "$CONFIG_FILE"
    ```
 
-6. **Apply CLI flag overrides** to in-memory config (`--time-mode`, `--branching`, `--plan-mode`, `--auto-commit`, `--dimensions`, `--mode`, …) — do not persist them. Resolve the work mode (Step 2.65) first and apply the individual flags after it, so an explicit flag wins over what `build` implies. `--dimensions=none` means an empty active set; `--dimensions=ui_ux,security` keeps only the listed known keys.
+6. **Apply CLI flag overrides** to in-memory config (`--time-mode`, `--branching`, `--plan-mode`, `--auto-commit`, `--dimensions`, `--mode`, …) — do not persist them. Resolve the work mode (Step 2.65) first and apply the individual flags after it, so an explicit flag wins over what `fast` implies. `--dimensions=none` means an empty active set; `--dimensions=ui_ux,security` keeps only the listed known keys.
 
 7. **Never echo the API token** in shell output. When invoking `curl`, pass auth via `-u` to keep it out of `ps`.
 
@@ -174,7 +174,10 @@ fi
 # Fill in any new key that the user has not set explicitly
 jq '
   (.plan_mode //= "overview") |
-  (.mode //= "harden") |
+  # v1.7.0: the work mode left this shared file — Step 2.65 reads it from the
+  # project file `.claude/work-mode.local.md` only. Deleting an absent key is
+  # a no-op, so this stays idempotent.
+  del(.mode) |
   (.fetch_comments_mode //= "when_needed") |
   (.fetch_attachments |= if . == null then true else . end) |
   (.fetch_file_comments |= if . == null then true else . end) |
@@ -399,7 +402,7 @@ default and only while `done_stage_schema` is absent, then set it to `2` —
 so the file ends in the same state whichever plugin runs first, and none of
 them rewrites a value the user chose.
 
-The `mode` key (added in 1.6.0, `"harden"` by default) is the persistent work mode — `"build"` turns the quality dimensions, the test proposal, the per-task tests and Pint and the `/teamwork-task-test` handoff off at once; see Step 2.65. A project's `.claude/wame-mode.local.md` wins over it, `--mode=` wins over both.
+The top-level `mode` key that 1.6.0 added is **gone since 1.7.0**: the migration deletes it (`del(.mode)`) and nothing reads it any more — `teamwork-task-test`, which shares this file, neither reads nor writes it either. The work mode is a per-project setting in `.claude/work-mode.local.md` (plugin `work-mode`); its global default is the `work-mode` plugin option `default_mode` in Claude Code `/config`, which that plugin's SessionStart hook writes into the project file. See Step 2.65.
 
 The `auto_run_tests_after` key (added in 1.1.1) controls whether this skill, on a clean finish, hands off to `/teamwork-task-test` to verify the acceptance criteria of every implemented task. Default is `true`. Disable per run with `--test-after=false`.
 
@@ -486,39 +489,59 @@ chains into Step 10 cleanup without re-asking. Disable per run with
 
 ---
 
-## Step 2.65 — Work mode: build vs. harden (v1.6.0)
+## Step 2.65 — Work mode: fast vs. full (v1.6.0, renamed in v1.7.0)
 
 Most of a run's wall-clock time used to go to verification, not to building:
 the five-dimension plan and self-check, a proposed test file per task, a
 filtered test run and Pint per task, browser checks and finally the whole
 `/teamwork-task-test` pass — on every task. The work mode lets the user defer
-all of that to **one** explicit hardening pass at the end of a feature.
+all of that to **one** explicit full pass at the end of a feature.
 
 **Resolution order** (first hit wins):
-1. `--mode=build|harden` on the command line;
-2. the project's `.claude/wame-mode.local.md` YAML frontmatter `mode:` —
-   written by `/wame-mode` from the `wame-work-mode` plugin, so one switch
-   drives every WAME plugin in that project;
-3. `config.mode` in the shared config (`"harden"` by default);
-4. `harden`.
+1. `--mode=fast|full` on the command line;
+2. the project's `.claude/work-mode.local.md` YAML frontmatter `mode:` —
+   written by `/work-mode` from the `work-mode` plugin, so one switch drives
+   every WAME plugin in that project. A global default lives in Claude Code
+   `/config` as the `work-mode` plugin option `default_mode`; that plugin's
+   SessionStart hook writes it into this file, so this skill only ever reads
+   the project file — never `/config` and never the shared config;
+3. the legacy `.claude/wame-mode.local.md` (plugin `wame-work-mode` 1.0.0),
+   read only when the new file is absent — `build` maps to `fast`, `harden`
+   to `full`;
+4. `full`.
+
+`--mode=build` and `--mode=harden` are deprecated aliases of `fast` and
+`full`, kept for one version; each prints one `⚠` line.
 
 ```bash
 WORK_MODE="<value of --mode, or empty>"
-if [ -z "$WORK_MODE" ] && [ -f .claude/wame-mode.local.md ]; then
-  WORK_MODE=$(sed -n '/^---$/,/^---$/{s/^mode:[[:space:]]*//p;}' .claude/wame-mode.local.md \
-    | head -n 1 | tr -d "\"' \r")
+case "$WORK_MODE" in
+  build)  WORK_MODE=fast; echo "⚠ --mode=build is deprecated — use --mode=fast (renamed in 1.7.0)." ;;
+  harden) WORK_MODE=full; echo "⚠ --mode=harden is deprecated — use --mode=full (renamed in 1.7.0)." ;;
+esac
+MODE_FILE=""
+if [ -z "$WORK_MODE" ]; then
+  if [ -f .claude/work-mode.local.md ]; then
+    MODE_FILE=.claude/work-mode.local.md
+  elif [ -f .claude/wame-mode.local.md ]; then
+    MODE_FILE=.claude/wame-mode.local.md
+  fi
 fi
-[ -z "$WORK_MODE" ] && WORK_MODE=$(jq -r '.mode // empty' "$CONFIG_FILE")
-case "$WORK_MODE" in build|harden) ;; *) WORK_MODE=harden ;; esac
-echo "WORK_MODE=$WORK_MODE"
+if [ -n "$MODE_FILE" ]; then
+  WORK_MODE=$(sed -n '/^---$/,/^---$/{s/^mode:[[:space:]]*//p;}' "$MODE_FILE" \
+    | head -n 1 | tr -d "\"' \r")
+  case "$WORK_MODE" in build) WORK_MODE=fast ;; harden) WORK_MODE=full ;; esac
+fi
+case "$WORK_MODE" in fast|full) ;; *) WORK_MODE=full ;; esac
+echo "WORK_MODE=$WORK_MODE (${MODE_FILE:-flag or default})"
 ```
 
 Remember `WORK_MODE` like `USER_ID` and write it literally into later snippets.
 
-**What `build` switches off at once** (in memory only — the config file is
-never rewritten):
+**What `fast` switches off at once** (in memory only — no file is ever
+rewritten by this step):
 
-| Switch | `harden` (default) | `build` |
+| Switch | `full` (default) | `fast` |
 |---|---|---|
 | Quality dimensions (Steps 6.2 / 6.5.5) | `config.build_quality.dimensions` | `[]` — same as `--dimensions=none` |
 | Test proposal (Step 6.2.5) | `config.auto_propose_tests` | `false` |
@@ -526,15 +549,30 @@ never rewritten):
 | `/teamwork-task-test` handoff (Step 8) | `config.auto_run_tests_after` | `false` — same as `--test-after=false` |
 | Browser / click-through checks, docs and version lookups | as the steps say | skipped |
 
-An explicit individual flag still wins: `--mode=build --dimensions=security`
-keeps the security self-check, `--mode=build --test-after=true` still hands
-off to QA. Build mode skips **verification, not bookkeeping** — fetching,
+An explicit individual flag still wins: `--mode=fast --dimensions=security`
+keeps the security self-check, `--mode=fast --test-after=true` still hands
+off to QA. Fast mode skips **verification, not bookkeeping** — fetching,
 the readiness gate, the plan approval, board moves, the safety gate, one
 commit per task and the time logs all run as usual.
 
-**Deferred list.** In `build` mode, right after each task's commit (Step 6.7)
-append one block to the project's `.claude/wame-deferred.local.md` (create it
-when missing):
+**Deferred list.** In `fast` mode, right after each task's commit (Step 6.7)
+append one block to the project's `.claude/work-mode-deferred.local.md`. When
+only the legacy `.claude/wame-deferred.local.md` exists, `mv` it to the new
+name first so earlier entries are not lost, then append (create the file when
+neither exists):
+
+```bash
+DEFERRED=.claude/work-mode-deferred.local.md
+mkdir -p .claude
+if [ ! -f "$DEFERRED" ] && [ -f .claude/wame-deferred.local.md ]; then
+  mv .claude/wame-deferred.local.md "$DEFERRED"
+  echo "ℹ Renamed .claude/wame-deferred.local.md → $DEFERRED (work-mode 2.0.0 name)."
+fi
+git check-ignore -q "$DEFERRED" \
+  || echo "⚠ $DEFERRED is not git-ignored — add .claude/*.local.md to .gitignore; it must never be committed."
+```
+
+Then append the block (same format as before 1.7.0):
 
 ```markdown
 ## [<task-id>] <task title> — <YYYY-MM-DD HH:MM> — <commit hash>
@@ -543,10 +581,11 @@ when missing):
 - Skipped: dimensions, test proposal, tests, Pint, QA handoff
 ```
 
-`/wame-harden` (plugin `wame-work-mode`) reads this file, runs the skipped
-checks once, fixes what they find and clears it. Never stage or commit the
-file; if the project's `.gitignore` does not cover `.claude/*.local.md`, print
-one `⚠` line saying so.
+`/work-mode full` (plugin `work-mode`) reads this file, runs the skipped
+checks once, fixes what they find, clears it and switches the project to
+`full`. **Never stage or commit** the deferred list or the mode file — under
+either name. Step 6.7 stages explicit paths only and unstages these four
+files before every commit, so a stray `git add .claude` cannot carry them in.
 
 **Browser tooling rule (every mode).** Never install or uninstall Playwright,
 Puppeteer or Laravel Dusk for a single run. Use the chrome-devtools MCP or the
@@ -2722,7 +2761,7 @@ concrete step for each one that applies. The keys are exactly the ones
 in mind is cheaper than having QA find the gap after the commit. The active
 set is `config.build_quality.dimensions` (default all five) or the
 `--dimensions=` override; `none` / `[]` skips this block and Step 6.5.5, and
-the final summary says `skipped (--dimensions=none)`. In `build` mode
+the final summary says `skipped (--dimensions=none)`. In `fast` mode
 (Step 2.65) the active set is `[]` unless `--dimensions=` names keys explicitly.
 
 Decide from the **shape of the planned change**, not from the task's wording —
@@ -2914,7 +2953,7 @@ the choice was non-obvious.
 ### 6.2.5 Test strategy — propose tests when none are specified
 
 If `config.auto_propose_tests == true` (default), the work mode is not
-`build` (Step 2.65 forces it `false`), and the task does **not**
+`fast` (Step 2.65 forces it `false`), and the task does **not**
 already specify a testing strategy, the skill proposes a concrete test plan
 and implements it alongside the code change. This guards against the common
 trap where a Teamwork ticket says only *"add PDF export to invoice"* and
@@ -3093,7 +3132,7 @@ this block before the timer starts.
   `cypress/e2e/…` for JS).
 
 ### 6.4 Test
-Skipped in `build` mode (Step 2.65) unless `--test-after=true` or a task
+Skipped in `fast` mode (Step 2.65) unless `--test-after=true` or a task
 explicitly asks for tests — the deferred list records it instead.
 If the project has a test suite and the change is testable:
 - Laravel/Pest: `php artisan test --compact --filter=<RelevantTest>`
@@ -3102,7 +3141,7 @@ If the project has a test suite and the change is testable:
 
 ### 6.5 Format
 If PHP files changed: `vendor/bin/pint --dirty --format agent`. Skipped in
-`build` mode (Step 2.65) — `/wame-harden` runs the formatter once at the end.
+`fast` mode (Step 2.65) — `/work-mode full` runs the formatter once at the end.
 
 ### 6.5.5 Quality self-check (v1.5.0)
 
@@ -3423,9 +3462,14 @@ Optional detailed description on next lines.
 - `<task-id>`: numeric Teamwork task ID — exactly as returned by the API (no `#` prefix), so a grep for `[123456]` finds every commit related to that task
 - **Do NOT add `Co-Authored-By` lines.**
 
-Stage only files that belong to this task (`git add <paths>`), then commit by **piping the body to `git commit -F -`** instead of using an unquoted heredoc — the Teamwork task description / final_summary can legitimately contain `$(...)`, backticks, or `${VAR}` which would otherwise be expanded (or executed) by the shell:
+Stage only files that belong to this task (`git add <paths>` — never `git add -A` / `git add .claude`), make sure the work-mode state files are not in the index (in **every** mode — a list left over from an earlier `fast` stretch must not ride along either), then commit by **piping the body to `git commit -F -`** instead of using an unquoted heredoc — the Teamwork task description / final_summary can legitimately contain `$(...)`, backticks, or `${VAR}` which would otherwise be expanded (or executed) by the shell:
 
 ```bash
+# Work-mode state is local: unstage it if anything put it in the index.
+# A no-op for paths that are not staged or do not exist.
+git reset -q -- .claude/work-mode-deferred.local.md .claude/work-mode.local.md \
+  .claude/wame-deferred.local.md .claude/wame-mode.local.md
+
 COMMIT_TITLE="UPDATE(${SCOPE})[${TASK_ID}]: ${SHORT_SUMMARY}"
 
 # Build the body in a way that NEVER lets shell expansion touch user-supplied
@@ -3452,8 +3496,10 @@ EOF
 
 Capture the commit hash for the time log and final summary: `COMMIT_HASH=$(git rev-parse --short HEAD)`.
 
-In `build` mode, now append the task's block to `.claude/wame-deferred.local.md`
-(Step 2.65) — never stage that file.
+In `fast` mode, now append the task's block to `.claude/work-mode-deferred.local.md`
+(Step 2.65 — `mv` the legacy `.claude/wame-deferred.local.md` to that name
+first when only the legacy file exists). The append happens **after** the
+commit, so the file can never be part of it — never stage it.
 
 Examples:
 ```
@@ -3628,7 +3674,7 @@ Followed by a short status block:
 ```
 Time cursor: <TIME_CURSOR_SOURCE>           e.g. "last_timelog @ 10:50"
                                             or  "skill start (first log of day)"
-Work mode (Step 2.65):                        <harden | build — N task(s) recorded in .claude/wame-deferred.local.md; run /wame-harden before pushing>
+Work mode (Step 2.65):                        <full | fast — N task(s) recorded in .claude/work-mode-deferred.local.md; run /work-mode full before pushing>
 Tasklist filter:                              <start columns <TF_TODO_LABEL> + me — N implemented, M analyse-only (K not on the board), L dropped> | <disabled / single-task URL>
 Analyse-only tasks (not touched):             <list of [#id] title from ANALYSE_ONLY_TASKS or none>
 Timelogs skipped (cursor caught up with now): <list from SKIPPED_TIMELOGS or none>
@@ -3657,7 +3703,7 @@ The push reminder is intentionally **not** printed here — it moves to Step 9, 
 
 ## Step 8 — Auto-run `/teamwork-task-test` (optional handoff)
 
-**Check the work mode first (v1.6.0).** When `WORK_MODE=build` (Step 2.65) and the user did not pass `--test-after=true`, skip this whole step: print `ℹ Build mode — /teamwork-task-test not run; /wame-harden runs the deferred checks once.` and go to Step 9. When the handoff does run in `build` mode (explicit `--test-after=true`), append `--mode=harden` to `TEST_ARGS` in Step 8.2 so the QA pass does not inherit the project's build mode.
+**Check the work mode first (v1.6.0).** When `WORK_MODE=fast` (Step 2.65) and the user did not pass `--test-after=true`, skip this whole step: print `ℹ Fast mode — /teamwork-task-test not run; /work-mode full runs the deferred checks once.` and go to Step 9. When the handoff does run in `fast` mode (explicit `--test-after=true`), append `--mode=full` to `TEST_ARGS` in Step 8.2 so the QA pass does not inherit the project's fast mode.
 
 Otherwise, if `config.auto_run_tests_after == true` (default, added in 1.1.1) and the user did not pass `--test-after=false`, hand off to the `/teamwork-task-test` skill for per-criterion verification.
 

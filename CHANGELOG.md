@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.7.0] - 2026-10-07
+
+The companion plugin `wame-work-mode` 1.0.0 was renamed to
+[`work-mode`](https://github.com/wamesk/claude-code-plugin-work-mode) 2.0.0
+(decided 2026-10-07), and its modes and files were renamed with it. 1.7.0
+follows the new names, drops the `mode` key from the shared config — the
+global default moved to Claude Code `/config` — and keeps reading the old
+names for one version so nothing breaks mid-feature.
+
+### Changed
+
+- **Modes renamed: `build` → `fast`, `harden` → `full`** (`full` stays the
+  default). `--mode=fast|full` in the argument hint, Step 2.65 and every step
+  that branches on the mode (6.2, 6.2.5, 6.4, 6.5, 6.7, 7, 8). The Step 8
+  handoff now forwards `--mode=full` to `/teamwork-task-test`.
+- **Commands renamed in the companion plugin.** `/wame-mode build|harden|status`
+  is now `/work-mode fast|full|status` (no argument opens a menu);
+  `/wame-harden` is now `/work-mode full`, which runs the pending deferred
+  checks once and then switches to `full` (`/work-mode full --no-checks` only
+  switches). All references point to the new commands.
+- **Project files renamed.** The mode file is `.claude/work-mode.local.md`
+  (frontmatter `mode: fast|full`), the deferred list
+  `.claude/work-mode-deferred.local.md` (same block format as before).
+- **Mode resolution (Step 2.65):** `--mode=` > `.claude/work-mode.local.md` >
+  legacy `.claude/wame-mode.local.md` (`build` → `fast`, `harden` → `full`) >
+  `full`. There is no config fallback any more: the global default is the
+  `work-mode` plugin option `default_mode` in `/config`, which that plugin's
+  SessionStart hook writes into the project's mode file, so this skill only
+  reads the project file.
+- **The deferred list is never staged.** Step 6.7 stages explicit paths only
+  and runs `git reset -q --` on both deferred-list names and both mode-file
+  names before every commit, in every mode; the block is appended after the
+  commit; a list that is not git-ignored prints one `⚠` line
+  (`git check-ignore`).
+
+### Removed
+
+- **The `mode` config key.** The Step 2.6 migration drops
+  `(.mode //= "harden")` and runs an idempotent `del(.mode)` instead;
+  `config.example.json` no longer carries the key. If you had set it to
+  `build`, set the `work-mode` plugin's `default_mode` to `fast` in `/config`.
+
+### Deprecated
+
+- **The pre-rename names, read for one version only.** `--mode=build` /
+  `--mode=harden` map to `fast` / `full` and print one `⚠` line; the legacy
+  `.claude/wame-mode.local.md` is read when the new mode file is absent; when
+  only the legacy `.claude/wame-deferred.local.md` exists, it is `mv`-ed to
+  `.claude/work-mode-deferred.local.md` before the first append, so no
+  deferred entry is lost.
+
+---
+
 ## [1.6.0] - 2026-10-06
 
 Most of a run went to verification instead of building: the five quality

@@ -10,16 +10,25 @@ entries. Push to remote is intentionally left to the user.
 
 Part of the [`wame`](https://github.com/wamesk/claude-code) Claude Code plugin marketplace.
 
-**Current version:** 1.6.0 — see [`CHANGELOG.md`](CHANGELOG.md) for the full release history.
+**Current version:** 1.7.0 — see [`CHANGELOG.md`](CHANGELOG.md) for the full release history.
 
 ---
 
+## What's new in 1.7.0
+
+- **Work modes renamed: `fast` and `full`.** The companion plugin `wame-work-mode` 1.0.0 became [`work-mode`](https://github.com/wamesk/claude-code-plugin-work-mode) 2.0.0, and the names follow it: `--mode=fast|full` (`full` stays the default), `/work-mode fast|full|status` to switch (no argument opens a menu), and `/work-mode full` to run the deferred checks once and then switch to full (`/work-mode full --no-checks` only switches). The project files are `.claude/work-mode.local.md` (frontmatter `mode: fast|full`) and `.claude/work-mode-deferred.local.md` (same block format as before).
+- **No `mode` key in the shared config any more.** The global default lives in Claude Code `/config` as the `work-mode` plugin option `default_mode`; that plugin's SessionStart hook writes it into the project's mode file, so this skill only reads the project file. The Step 2.6 migration deletes the `mode` key (idempotent). Resolution order: `--mode` > `.claude/work-mode.local.md` > legacy `.claude/wame-mode.local.md` > `full`.
+- **The old names still work for one version.** `--mode=build` / `--mode=harden` map to `fast` / `full` and print one `⚠` line; a project that only has the legacy `.claude/wame-mode.local.md` is still read (`build` → `fast`, `harden` → `full`); a legacy `.claude/wame-deferred.local.md` is moved to the new name before the first append, so no deferred entry is lost.
+- **The deferred list cannot ride along in a commit.** Step 6.7 stages explicit paths only and unstages both deferred-list names and both mode-file names before every commit, in every mode; the deferred block is appended only after the commit, and a list that is not git-ignored prints one `⚠` line.
+
+The 1.7.0 migration only removes `mode` from your config. If you had set it to the fast value, set the `work-mode` plugin's `default_mode` to `fast` in `/config` instead.
+
 ## What's new in 1.6.0
 
-- **Work modes: build fast, harden once.** Agents used to spend most of a run verifying instead of building — the quality dimensions, a proposed test per task, a test run and Pint per task, browser checks and the whole `/teamwork-task-test` pass on every task. `--mode=build` (or `"mode": "build"` in the config, or `mode: build` in the project's `.claude/wame-mode.local.md` written by `/wame-mode` from the [`wame-work-mode`](https://github.com/wamesk/claude-code-plugin-wame-work-mode) plugin) switches all of that off at once — the same as `--dimensions=none --test-after=false` plus `auto_propose_tests: false`, no per-task tests / Pint and no browser work. Each committed task is recorded in `.claude/wame-deferred.local.md`, and `/wame-harden` runs every skipped check once at the end. Fetching, board moves, commits and time logs run as usual. `harden` (default) behaves exactly like 1.5.0; an explicit individual flag still wins over the mode. Resolution order: `--mode` > `.claude/wame-mode.local.md` > `config.mode` > `harden`. See [Work modes](#work-modes-v160).
+- **Work modes: build fast, verify once.** Agents used to spend most of a run verifying instead of building — the quality dimensions, a proposed test per task, a test run and Pint per task, browser checks and the whole `/teamwork-task-test` pass on every task. `--mode=fast` (or `mode: fast` in the project's `.claude/work-mode.local.md` written by `/work-mode` from the [`work-mode`](https://github.com/wamesk/claude-code-plugin-work-mode) plugin) switches all of that off at once — the same as `--dimensions=none --test-after=false` plus `auto_propose_tests: false`, no per-task tests / Pint and no browser work. Each committed task is recorded in `.claude/work-mode-deferred.local.md`, and `/work-mode full` runs every skipped check once at the end. Fetching, board moves, commits and time logs run as usual. `full` (default) behaves exactly like 1.5.0; an explicit individual flag still wins over the mode. See [Work modes](#work-modes-v170). *(Shown with the 1.7.0 names — see [What's new in 1.7.0](#whats-new-in-170) for what was renamed.)*
 - **No more browser tooling installed on the fly.** The skill never installs or uninstalls Playwright, Puppeteer or Dusk for a single run. It uses the chrome-devtools MCP or the runner the project already has; a missing runner is asked about **once**, and on yes it is installed permanently as a committed dev dependency.
 
-The 1.6.0 migration only adds `"mode": "harden"` to your config — nothing changes until you choose `build`.
+The 1.6.0 migration only added a `mode` key to your config (removed again in 1.7.0) — nothing changed until you chose the fast mode.
 
 ## What's new in 1.5.0
 
@@ -148,7 +157,7 @@ Optional flags (override the saved config **for this run only**, not persisted):
 - `--worktree-target=ask|parent|main|<branch>` — when `--worktree-handoff=merge`, decide the target branch (default `ask`).
 - `--subtasks=true|false` — **v1.4.0**, expand parent tasks into their subtasks (default `true`).
 - `--dimensions=<csv>|none` — **v1.5.0**, which build-time quality dimensions to plan and self-check: any subset of `ui_ux,performance,security,reachability,framework`, or `none` (default: `build_quality.dimensions`, all five). See [Build-time quality](#build-time-quality-v150).
-- `--mode=build|harden` — **v1.6.0**, work mode for this run (default: `.claude/wame-mode.local.md`, then `mode`, then `harden`). `build` = no quality dimensions, no test proposal, no per-task tests / Pint, no browser work and no `/teamwork-task-test` handoff; skipped checks go to `.claude/wame-deferred.local.md` for `/wame-harden`. See [Work modes](#work-modes-v160).
+- `--mode=fast|full` — **v1.6.0**, renamed in **v1.7.0**; work mode for this run (default: `.claude/work-mode.local.md`, then the legacy `.claude/wame-mode.local.md`, then `full`). `fast` = no quality dimensions, no test proposal, no per-task tests / Pint, no browser work and no `/teamwork-task-test` handoff; skipped checks go to `.claude/work-mode-deferred.local.md` for `/work-mode full`. The old values `build` / `harden` are deprecated aliases for one version (one `⚠` line). See [Work modes](#work-modes-v170).
 
 ## What the plugin does, step by step
 
@@ -194,7 +203,6 @@ File: `~/.claude/plugins/data/teamwork-task-wamesk/config.json`
 | `teamwork.base_url`                       | `https://<workspace>.teamwork.com`                                       | Your Teamwork workspace URL. Asked on first run.                                                                                                                                       |
 | `teamwork.api_token`                      | (empty)                                                                  | Personal API key. Asked on first run. Stored at chmod 0600.                                                                                                                            |
 | `plan_mode`                               | `overview`                                                               | `overview` (one approval for the whole tasklist), `per_task` (approval before each task), or `none`.                                                                                   |
-| `mode`                                    | `harden`                                                                 | **v1.6.0** — work mode. `build` = `build_quality.dimensions: []`, `auto_run_tests_after: false`, `auto_propose_tests: false`, no per-task tests / Pint / browser work; skipped checks recorded for `/wame-harden`. Project `.claude/wame-mode.local.md` wins; per run: `--mode=`. See [Work modes](#work-modes-v160). |
 | `fetch_comments_mode`                     | `when_needed`                                                            | `always`, `when_needed` (default), or `never`. `when_needed` always reads the newest comment and fetches the full thread only when the description is thin. See [Fetching comments](#fetching-comments). |
 | `fetch_attachments`                       | `true`                                                                   | If `true`, task and comment file attachments are downloaded into `./teamwork-task-<id>/`.                                                                                              |
 | `fetch_file_comments`                     | `true`                                                                   | If `true`, comments attached to file objects are fetched and surfaced in the plan.                                                                                                     |
@@ -455,9 +463,9 @@ On the QA side `/teamwork-task-test` (1.2.0+) treats `framework` as **advisory**
 `build_quality.dimensions_schema` records which key set your list was last reconciled with (absent = a four-key list from a pre-release 1.5.0 build; `2` = five keys). The Step 2.6 migration adds `framework` **once**, and only when the marker is absent and the list is exactly `ui_ux`, `performance`, `security`, `reachability` (each once, any order) — such a list cannot be told apart from the untouched old default. Every other list counts as customised and is left untouched: a subset, `[]`, a list that already names `framework`, or one with other keys. A missing list gets the five-key default. Afterwards the marker is `2`, so if you remove `framework` from the list it stays removed on every later run.
 
 
-## Work modes (v1.6.0)
+## Work modes (v1.7.0)
 
-| | `harden` (default) | `build` |
+| | `full` (default) | `fast` |
 |---|---|---|
 | Quality dimensions (Steps 6.2 / 6.5.5) | `build_quality.dimensions` | none (`--dimensions=none`) |
 | Auto-proposed tests (Step 6.2.5) | `auto_propose_tests` | off |
@@ -466,7 +474,7 @@ On the QA side `/teamwork-task-test` (1.2.0+) treats `framework` as **advisory**
 | `/teamwork-task-test` handoff (Step 8) | `auto_run_tests_after` | off (`--test-after=false`) |
 | Fetching, board moves, commits, time logs | run | run |
 
-Resolution: `--mode=` > the project's `.claude/wame-mode.local.md` frontmatter `mode:` (written by `/wame-mode`, plugin `wame-work-mode`) > `mode` in the shared config > `harden`. An explicit `--dimensions=` or `--test-after=true` still wins over `build`. In `build` mode every committed task appends its files, screens and skipped checks to `.claude/wame-deferred.local.md` (never committed); `/wame-harden` runs those checks once — tests, Pint, the quality self-check, security and code review, one visual pass — and clears the list.
+Resolution: `--mode=` > the project's `.claude/work-mode.local.md` frontmatter `mode:` (written by `/work-mode`, plugin `work-mode`) > the legacy `.claude/wame-mode.local.md` (read for one more version; `build` → `fast`, `harden` → `full`) > `full`. There is no config key: the global default is the `work-mode` plugin option `default_mode` in Claude Code `/config`, and that plugin's SessionStart hook writes it into the project's mode file. An explicit `--dimensions=` or `--test-after=true` still wins over `fast`. In `fast` mode every committed task appends its files, screens and skipped checks to `.claude/work-mode-deferred.local.md` (a legacy `.claude/wame-deferred.local.md` is moved there first; the list is never staged or committed); `/work-mode full` runs those checks once — tests, Pint, the quality self-check, security and code review, one visual pass — clears the list and switches back to `full`.
 
 ## Attachments
 
