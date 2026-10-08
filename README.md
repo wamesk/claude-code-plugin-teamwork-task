@@ -10,9 +10,13 @@ entries. Push to remote is intentionally left to the user.
 
 Part of the [`wame`](https://github.com/wamesk/claude-code) Claude Code plugin marketplace.
 
-**Current version:** 1.7.0 — see [`CHANGELOG.md`](CHANGELOG.md) for the full release history.
+**Current version:** 1.8.0 — see [`CHANGELOG.md`](CHANGELOG.md) for the full release history.
 
 ---
+
+## What's new in 1.8.0
+
+- **Fast mode defers verification, not quality.** `ui_ux` (UI/UX and accessibility) stays on at build time in `fast` mode: when it is in `build_quality.dimensions`, Step 6.2 plans it and Step 6.3 follows its rules exactly as in `full`. `performance`, `security` and `reachability` get no plan line, but the code still covers them by taking the patterns the sibling code already uses (eager loading, the neighbours' policies, the menu entry and inbound links of a new screen). `framework` stays off — no version or docs lookups, sibling idioms only; `/work-mode full` checks frameworks, standards and best practices. The Step 6.5.5 self-check is still deferred to `/work-mode full`, and an explicit `--dimensions=` still wins. `full` is unchanged.
 
 ## What's new in 1.7.0
 
@@ -25,7 +29,7 @@ The 1.7.0 migration only removes `mode` from your config. If you had set it to t
 
 ## What's new in 1.6.0
 
-- **Work modes: build fast, verify once.** Agents used to spend most of a run verifying instead of building — the quality dimensions, a proposed test per task, a test run and Pint per task, browser checks and the whole `/teamwork-task-test` pass on every task. `--mode=fast` (or `mode: fast` in the project's `.claude/work-mode.local.md` written by `/work-mode` from the [`work-mode`](https://github.com/wamesk/claude-code-plugin-work-mode) plugin) switches all of that off at once — the same as `--dimensions=none --test-after=false` plus `auto_propose_tests: false`, no per-task tests / Pint and no browser work. Each committed task is recorded in `.claude/work-mode-deferred.local.md`, and `/work-mode full` runs every skipped check once at the end. Fetching, board moves, commits and time logs run as usual. `full` (default) behaves exactly like 1.5.0; an explicit individual flag still wins over the mode. See [Work modes](#work-modes-v170). *(Shown with the 1.7.0 names — see [What's new in 1.7.0](#whats-new-in-170) for what was renamed.)*
+- **Work modes: build fast, verify once.** Agents used to spend most of a run verifying instead of building — the quality dimensions, a proposed test per task, a test run and Pint per task, browser checks and the whole `/teamwork-task-test` pass on every task. `--mode=fast` (or `mode: fast` in the project's `.claude/work-mode.local.md` written by `/work-mode` from the [`work-mode`](https://github.com/wamesk/claude-code-plugin-work-mode) plugin) switches all of that off at once — the same as `--dimensions=none --test-after=false` plus `auto_propose_tests: false`, no per-task tests / Pint and no browser work. Each committed task is recorded in `.claude/work-mode-deferred.local.md`, and `/work-mode full` runs every skipped check once at the end. Fetching, board moves, commits and time logs run as usual. `full` (default) behaves exactly like 1.5.0; an explicit individual flag still wins over the mode. See [Work modes](#work-modes-v170). *(Shown with the 1.7.0 names — see [What's new in 1.7.0](#whats-new-in-170) for what was renamed; since 1.8.0 `fast` keeps `ui_ux` on at build time — see [What's new in 1.8.0](#whats-new-in-180).)*
 - **No more browser tooling installed on the fly.** The skill never installs or uninstalls Playwright, Puppeteer or Dusk for a single run. It uses the chrome-devtools MCP or the runner the project already has; a missing runner is asked about **once**, and on yes it is installed permanently as a committed dev dependency.
 
 The 1.6.0 migration only added a `mode` key to your config (removed again in 1.7.0) — nothing changed until you chose the fast mode.
@@ -157,7 +161,7 @@ Optional flags (override the saved config **for this run only**, not persisted):
 - `--worktree-target=ask|parent|main|<branch>` — when `--worktree-handoff=merge`, decide the target branch (default `ask`).
 - `--subtasks=true|false` — **v1.4.0**, expand parent tasks into their subtasks (default `true`).
 - `--dimensions=<csv>|none` — **v1.5.0**, which build-time quality dimensions to plan and self-check: any subset of `ui_ux,performance,security,reachability,framework`, or `none` (default: `build_quality.dimensions`, all five). See [Build-time quality](#build-time-quality-v150).
-- `--mode=fast|full` — **v1.6.0**, renamed in **v1.7.0**; work mode for this run (default: `.claude/work-mode.local.md`, then the legacy `.claude/wame-mode.local.md`, then `full`). `fast` = no quality dimensions, no test proposal, no per-task tests / Pint, no browser work and no `/teamwork-task-test` handoff; skipped checks go to `.claude/work-mode-deferred.local.md` for `/work-mode full`. The old values `build` / `harden` are deprecated aliases for one version (one `⚠` line). See [Work modes](#work-modes-v170).
+- `--mode=fast|full` — **v1.6.0**, renamed in **v1.7.0**; work mode for this run (default: `.claude/work-mode.local.md`, then the legacy `.claude/wame-mode.local.md`, then `full`). `fast` = only `ui_ux` planned at build time (the other keys follow the sibling code, **v1.8.0**), no quality self-check, no test proposal, no per-task tests / Pint, no browser work and no `/teamwork-task-test` handoff; skipped checks go to `.claude/work-mode-deferred.local.md` for `/work-mode full`. The old values `build` / `harden` are deprecated aliases for one version (one `⚠` line). See [Work modes](#work-modes-v170).
 
 ## What the plugin does, step by step
 
@@ -467,7 +471,8 @@ On the QA side `/teamwork-task-test` (1.2.0+) treats `framework` as **advisory**
 
 | | `full` (default) | `fast` |
 |---|---|---|
-| Quality dimensions (Steps 6.2 / 6.5.5) | `build_quality.dimensions` | none (`--dimensions=none`) |
+| Quality dimensions planned (Step 6.2) | `build_quality.dimensions` | `ui_ux` only (the others follow the sibling code) |
+| Quality self-check (Step 6.5.5) | run | skipped |
 | Auto-proposed tests (Step 6.2.5) | `auto_propose_tests` | off |
 | Per-task tests (6.4) and Pint (6.5) | run | skipped |
 | Browser checks, docs / version lookups | as configured | skipped |

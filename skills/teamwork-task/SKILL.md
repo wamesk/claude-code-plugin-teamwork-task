@@ -93,7 +93,7 @@ Optional flags (override config for this run only — not persisted):
 - `--tasklist-only-mine=true|false` — override `tasklist_filter.only_assigned_to_me` for this run (default `true`).
 - `--subtasks=true|false` — override `subtasks.enabled` for this run (default `true`, see Step 3.42).
 - `--dimensions=<csv>|none` — which build-time quality dimensions to plan (Step 6.2), follow (Step 6.3) and self-check (Step 6.5.5). Any subset of `ui_ux,performance,security,reachability,framework` (the same keys `/teamwork-task-test` reviews in its Step 6.6 — `framework` there as advisory recommendations only), or `none` to skip them (default: `config.build_quality.dimensions`, all five). Unknown keys are dropped with a `⚠` line.
-- `--mode=fast|full` — work mode for this run (default: resolved in Step 2.65 — the project's `.claude/work-mode.local.md`, then the legacy `.claude/wame-mode.local.md`, then `full`). `fast` builds fast: the quality dimensions, the test proposal, the per-task test run and Pint, browser checks and the `/teamwork-task-test` handoff are all off at once, and every skipped check is recorded for `/work-mode full`. `full` keeps every check exactly as before. An explicit individual flag (`--dimensions=…`, `--test-after=…`) still wins over the mode. The pre-1.7.0 values `--mode=build` / `--mode=harden` are deprecated aliases of `fast` / `full` (one `⚠` line).
+- `--mode=fast|full` — work mode for this run (default: resolved in Step 2.65 — the project's `.claude/work-mode.local.md`, then the legacy `.claude/wame-mode.local.md`, then `full`). `fast` builds fast and defers verification, not quality: `ui_ux` is still planned and built as in `full`, and the code follows the sibling patterns for performance, security and reachability (Step 2.65); the other dimensions' planning, the quality self-check, the test proposal, the per-task test run and Pint, browser checks and the `/teamwork-task-test` handoff are all off at once, and every skipped check is recorded for `/work-mode full`. `full` keeps every check exactly as before. An explicit individual flag (`--dimensions=…`, `--test-after=…`) still wins over the mode. The pre-1.7.0 values `--mode=build` / `--mode=harden` are deprecated aliases of `fast` / `full` (one `⚠` line).
 
 If `$ARGUMENTS` is empty or does not contain a URL, ask the user via **AskUserQuestion** for the Teamwork URL before doing anything else.
 
@@ -543,11 +543,24 @@ rewritten by this step):
 
 | Switch | `full` (default) | `fast` |
 |---|---|---|
-| Quality dimensions (Steps 6.2 / 6.5.5) | `config.build_quality.dimensions` | `[]` — same as `--dimensions=none` |
+| Quality dimensions planned (Step 6.2) | `config.build_quality.dimensions` | `ui_ux` only, when configured — see below |
+| Quality self-check (Step 6.5.5) | run | skipped |
 | Test proposal (Step 6.2.5) | `config.auto_propose_tests` | `false` |
 | Per-task test run (Step 6.4) and Pint (Step 6.5) | run | skipped |
 | `/teamwork-task-test` handoff (Step 8) | `config.auto_run_tests_after` | `false` — same as `--test-after=false` |
 | Browser / click-through checks, docs and version lookups | as the steps say | skipped |
+
+**Fast defers verification, not quality (v1.8.0).** `ui_ux` (UI/UX and
+accessibility) stays on at build time: when it is in
+`config.build_quality.dimensions`, Step 6.2 plans it and Step 6.3 follows its
+rules exactly as in `full`. `performance`, `security` and `reachability` get no
+plan line, but the code still covers them, written as well and as fast as
+possible by taking the patterns the sibling code already uses (eager loading,
+the neighbours' policies, the menu entry and inbound links of a new screen).
+`framework` stays off — no version detection, no docs lookups, copy the
+sibling idioms; `/work-mode full` checks frameworks, standards and best
+practices. The Step 6.5.5 self-check is deferred for every key, `ui_ux`
+included.
 
 An explicit individual flag still wins: `--mode=fast --dimensions=security`
 keeps the security self-check, `--mode=fast --test-after=true` still hands
@@ -578,7 +591,7 @@ Then append the block (same format as before 1.7.0):
 ## [<task-id>] <task title> — <YYYY-MM-DD HH:MM> — <commit hash>
 - Files: <paths in the commit>
 - Screens: <URLs / Nova resources the change shows up on, or none>
-- Skipped: dimensions, test proposal, tests, Pint, QA handoff
+- Skipped: quality self-check, test proposal, tests, Pint, QA handoff
 ```
 
 `/work-mode full` (plugin `work-mode`) reads this file, runs the skipped
@@ -2762,7 +2775,10 @@ in mind is cheaper than having QA find the gap after the commit. The active
 set is `config.build_quality.dimensions` (default all five) or the
 `--dimensions=` override; `none` / `[]` skips this block and Step 6.5.5, and
 the final summary says `skipped (--dimensions=none)`. In `fast` mode
-(Step 2.65) the active set is `[]` unless `--dimensions=` names keys explicitly.
+(Step 2.65) the active set is `ui_ux` alone (when configured) unless
+`--dimensions=` names keys explicitly — `performance`, `security` and
+`reachability` get no plan line and follow the sibling patterns instead,
+`framework` is off.
 
 Decide from the **shape of the planned change**, not from the task's wording —
 but a `### Prierezové požiadavky` / `### Cross-cutting requirements` block in the
@@ -3066,7 +3082,9 @@ this block before the timer starts.
 - Respect any project conventions found in `CLAUDE.md` at the repo root.
 - Write all code comments in **English**.
 - **Build-time quality rules (v1.5.0)** — follow the rules of every dimension
-  Step 6.2 marked *applies* (and only those):
+  Step 6.2 marked *applies* (and only those; in `fast` mode the unplanned
+  `performance`, `security` and `reachability` are still covered by copying
+  the sibling code's patterns — Step 2.65):
   - **`ui_ux`** — copy the sibling screen's patterns. Give every interactive
     element an accessible name; a disabled control gets `aria-disabled` (or a
     real `disabled`) **and** a visible reason (`title` / `aria-describedby`).
@@ -3149,7 +3167,10 @@ Before the timer stops, walk **this task's own diff** against the active
 dimensions from Step 6.2 — the same five keys `/teamwork-task-test` audits in
 its Step 6.6, so a gap found here costs minutes instead of a QA round trip.
 Skip the step (status `skipped(--dimensions)` for every key) when the active
-set is empty.
+set is empty. In `fast` mode (Step 2.65) skip it as well, `ui_ux` included,
+unless `--dimensions=` names keys explicitly — the self-check is deferred to
+`/work-mode full`; no rows are written, so the Step 7 cell reads
+`not self-checked`.
 
 ```bash
 # (run preamble — see Step 3)

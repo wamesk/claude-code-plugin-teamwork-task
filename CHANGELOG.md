@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.8.0] - 2026-10-08
+
+Fast mode deferred quality along with verification: Step 2.65 set the
+build-time dimensions to `[]`, so a fast run built screens without the UI/UX
+and accessibility rules and wrote the rest without the sibling patterns in
+mind. Decided 2026-10-08: fast mode does not drop quality — it only defers
+verification to `/work-mode full`. `full` is unchanged.
+
+### Changed
+
+- **`ui_ux` stays on at build time in `fast` mode.** The Step 6.2 active set
+  is `ui_ux` alone (when it is in `build_quality.dimensions`) instead of `[]`;
+  it is planned and built with the Step 6.3 `ui_ux` rules exactly as in
+  `full`. An explicit `--dimensions=` still wins.
+- **`performance`, `security`, `reachability` are covered without a plan.**
+  No plan line in `fast` mode, but the code is written as well and as fast as
+  possible to cover them by taking the patterns the sibling code already uses
+  — eager loading, the neighbours' policies, the menu entry and inbound links
+  of a new screen (Steps 2.65, 6.3).
+- **`framework` is unchanged** — off in `fast` mode: no version detection, no
+  docs lookups, sibling idioms only; `/work-mode full` checks frameworks,
+  standards and best practices.
+- **The Step 6.5.5 self-check stays deferred** in `fast` mode, `ui_ux`
+  included (no rows; the Step 7 cell reads `not self-checked`). The
+  deferred-list block now says `Skipped: quality self-check, …` instead of
+  `dimensions`. The `--mode` bullet, the Step 2.65 table, README and
+  `plugin.json` describe the new split.
+
+---
+
 ## [1.7.0] - 2026-10-07
 
 The companion plugin `wame-work-mode` 1.0.0 was renamed to
