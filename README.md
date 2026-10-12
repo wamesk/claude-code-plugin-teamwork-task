@@ -10,7 +10,7 @@ entries. Push to remote is intentionally left to the user.
 
 Part of the [`wame`](https://github.com/wamesk/claude-code) Claude Code plugin marketplace.
 
-**Current version:** 1.8.0 — see [`CHANGELOG.md`](CHANGELOG.md) for the full release history.
+**Current version:** 1.8.1 — see [`CHANGELOG.md`](CHANGELOG.md) for the full release history.
 
 ---
 

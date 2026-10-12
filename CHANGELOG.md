@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.8.1] - 2026-10-12
+
+### Changed
+
+- **Skill description within the claude.ai limits.** The claude.ai marketplace
+  sync stores a skill's frontmatter `description` cut to 1024 characters and
+  with angle brackets removed, and warned about this skill. The description is
+  now a short trigger summary (under 1024 characters, no angle brackets); the
+  behaviour is unchanged and stays in the body of `SKILL.md`.
+
 ## [1.8.0] - 2026-10-08
 
 Fast mode deferred quality along with verification: Step 2.65 set the
