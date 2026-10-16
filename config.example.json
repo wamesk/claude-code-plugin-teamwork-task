@@ -36,9 +36,6 @@
     "netreba testy"
   ],
 
-  "time_cursor_strategy": "last_teamwork_timelog",
-  "include_commit_hash_in_log_description": true,
-
   "board_workflow": {
     "enabled": true,
     "in_progress_stage": "In progress",
@@ -50,11 +47,14 @@
 
   "time_mode": "real_rounded_5m",
   "time_rounding_minutes": 5,
+  "time_cursor_strategy": "last_teamwork_timelog",
+  "include_commit_hash_in_log_description": true,
+  "is_billable_by_default": true,
+
   "branching_mode": "current_branch",
   "default_language": "sk",
   "auto_complete_finished_tasks": false,
   "skip_completed_tasks": true,
-  "is_billable_by_default": true,
 
   "auto_run_tests_after": true,
 
@@ -91,8 +91,6 @@
     "on_block_default": "ask"
   },
 
-  "min_log_minutes": 1,
-  "round_threshold_minutes": 4,
   "worktree_cleanup": {
     "enabled": true,
     "auto_remove_merged_clean": false,

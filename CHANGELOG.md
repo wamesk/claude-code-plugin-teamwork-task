@@ -7,6 +7,97 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.9.0] - 2026-10-16
+
+QA entries of 2–3 minutes showed up on the timesheet. `teamwork-task-test`
+had reused the sub-block rule this plugin introduced in 1.3.0: work below
+4 minutes was logged as raw minutes (1, 2, 3), and an entry that did not fit
+before *now* was cut to the exact free minutes (a 7-minute entry). Decided
+2026-10-16: every entry is whole 5-minute blocks; several quick tasks are
+merged into one entry instead of each getting its own fragment, and a leftover
+of even 1 minute is logged as 5 minutes. The rules no longer live in each
+tracker plugin: they are the tracker-independent `wame-time-logging` skill
+(rules `wame-time-logging-v1`) of the new
+[`work-rules`](https://github.com/wamesk/claude-code-plugin-work-rules) plugin,
+and this plugin is their Teamwork implementation.
+
+### Added
+
+- **`work-rules` dependency.** `plugin.json` declares `"dependencies":
+  ["work-rules"]`. Step 5.5 loads `work-rules:wame-time-logging` with the Skill
+  tool before the first time entry of the run; the Teamwork steps implement it,
+  and where they disagree, the skill wins. When the skill is not installed the
+  run logs no time, tells the user to run `/plugin install work-rules@wame`
+  and lists the unlogged tasks with their minutes in Step 7.
+- **The time bundle (Step 6.8).** A committed task joins the run's bundle.
+  Below one block the bundle waits — no entry, and the task's move to the done
+  column waits with it. At one block or more it becomes one entry: the nearest
+  block, half up, cut to the room up to the end of the current block (room =
+  `floor((ceil(now, block) − cursor) / block) × block`), held while the room is
+  0. The entry goes on the task with the most measured minutes (a tie: the task
+  finished last); with two or more tasks its description is the shared-entry
+  format of the rules (`Spoločný záznam za 3 úlohy (spolu 6 min práce):` + one
+  line per task). After the POST every task of the bundle moves to the done
+  column (Step 6.8.5) and its attachment folder is cleaned up (Step 6.9).
+- **End-of-run flush (new Step 6.12, before the Step 7 summary).** A bundle
+  that is not empty becomes one entry — one block even for 1 minute of work.
+  With no room left its tasks are appended to the description of the last
+  entry this run wrote (`Patrí sem aj: …`, via
+  `PATCH /projects/api/v3/time/{id}.json`; the minutes stay), or, when the run
+  wrote no entry, named in the summary with the reason. The deferred board moves
+  happen here.
+- **Start-time mode: `--log-from=HH:MM`**, or *loguj od HH:MM* / *čas od
+  HH:MM* in the message that starts the run (Steps 5.5, 6.12b). Nothing is
+  logged per task; at the end the span from the start (moved up to the grid)
+  to the end of the current block is split over the committed tasks by their
+  estimates (measured minutes for a task without one) by largest remainder,
+  shown as a table and written only after the user's OK. An own entry inside
+  the span stops the run with a question.
+- **Run files for the time state** in the per-run `TW_JOB_DIR` (`cursor`,
+  `bundle.tsv`, `entries.tsv`, `time_unlogged.tsv`, …) and one helper file,
+  `timelog_lib.sh`, written in Step 5.5a and sourced by every time snippet —
+  the arithmetic, the timesheet read and the writes exist once. The POST answer
+  goes to `$TW_JOB_DIR/timelog_resp.json` instead of the fixed
+  `/tmp/tw_timelog_resp.json`.
+
+### Changed
+
+- **The cursor never starts inside an existing entry (Step 5.5b).** When your
+  last own entry today ends after now, the cursor starts there anyway instead
+  of falling back to `floor(now)` — which could overlap that entry; the work
+  waits in the bundle until the clock gets there. The end is taken from all own
+  entries of today (still filtered by `assignedToUserIds`, `timeLogged` still
+  parsed as UTC, the `time` of a write still local — the TIMEZONE CONTRACT is
+  unchanged), and they are re-read right before every write.
+  `time_cursor_strategy: floor_now` starts at `floor(now)` only when no own
+  entry ends later. Without a resolved Teamwork user the run logs no time,
+  because no overlap can be ruled out.
+- **Step 6.6 only measures.** `MEASURED_MIN` is the task's wall-clock time
+  rounded up to whole minutes; nothing is rounded to blocks or capped there,
+  and only a committed task reaches the bundle.
+- **`time_mode=ask`** proposes each entry's minutes as the rules give them; the
+  number the user types is final and, when it is not whole blocks, noted in
+  the summary.
+- **Step 7** shows the time summary of the rules: where the cursor started and
+  why, one row per entry (start–end · minutes · owner task · other tasks), the
+  cut entries, the tasks appended to an earlier entry and the tasks with no
+  entry and why. The task table gets *Measured* and *Time entry* columns.
+- **Step 8.2 / 9.5** decide on commits, not on a written time entry — a
+  committed task is verified even while its time is held or unlogged.
+- **Skill description and `plugin.json`** mention the whole 5-minute blocks
+  and the `work-rules` dependency (the description stays under 1024 bytes,
+  without angle brackets).
+
+### Removed
+
+- **Step 6.6.1 (future-timestamp guard)** — the raw-minute zone, the clamp to
+  the exact free minutes and the `SKIPPED_TIMELOGS` / `CLAMPED_TIMELOGS` /
+  `SUB_ROUND_TIMELOGS` lists. The room check of the bundle replaces them.
+- **Config keys `round_threshold_minutes` and `min_log_minutes`** (and the
+  early-1.3.0 name `round_up_threshold_minutes`). The Step 2.6 migration
+  deletes them; `time_rounding_minutes` (the block, default `5`), `time_mode`
+  and `time_cursor_strategy` stay. `config.example.json` and the README follow.
+
 ## [1.8.1] - 2026-10-12
 
 ### Changed

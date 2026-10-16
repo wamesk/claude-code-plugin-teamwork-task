@@ -10,9 +10,17 @@ entries. Push to remote is intentionally left to the user.
 
 Part of the [`wame`](https://github.com/wamesk/claude-code) Claude Code plugin marketplace.
 
-**Current version:** 1.8.1 — see [`CHANGELOG.md`](CHANGELOG.md) for the full release history.
+**Current version:** 1.9.0 — see [`CHANGELOG.md`](CHANGELOG.md) for the full release history.
 
 ---
+
+## What's new in 1.9.0
+
+- **Time follows the `work-rules` rules — whole 5-minute blocks only.** Time logging implements the tracker-independent rules `wame-time-logging-v1` from the [`work-rules`](https://github.com/wamesk/claude-code-plugin-work-rules) plugin (skill `wame-time-logging`), now a declared dependency. Every entry is whole 5-minute blocks on the 5-minute grid — never the 1–3-minute or 7-minute entries of 1.3.0–1.8.1, which put QA entries of 2–3 minutes on the timesheet. See [Time logging behaviour](#time-logging-behaviour).
+- **Quick tasks share one entry.** A committed task joins the run's *bundle*; the bundle becomes one entry once it holds at least 5 minutes of work (the nearest block, half up), on the task with the most work, and the description names every task (`Spoločný záznam za 3 úlohy (spolu 6 min práce): …`). A leftover at the end of the run — even 1 minute — is one 5-minute entry. A task waiting in the bundle moves to *Done - Local* when its bundle is written.
+- **No overlaps, nothing ahead of the clock.** The cursor starts at the end of your last own entry today even when that end lies in the future (no more falling back to `floor(now)` over an existing entry), your own entries are re-read right before every write, and no entry ends after the current 5-minute block. When there is no room, the work waits; at the end of the run it is appended to the run's last entry (`Patrí sem aj: …`) or named in the summary with the reason.
+- **`--log-from=HH:MM`** (or *loguj od 13:00*): nothing is logged per task; at the end the span from that time to the end of the current block is split over the tasks by their estimates, shown as a table and written after your OK.
+- **Config:** `round_threshold_minutes` and `min_log_minutes` are removed (the migration deletes them); `time_rounding_minutes` (the block, `5`), `time_mode` and `time_cursor_strategy` stay.
 
 ## What's new in 1.8.0
 
@@ -71,7 +79,7 @@ The 1.4.0 migration is automatic and idempotent. Your existing config gains the 
 - **Three new CLI flags** for per-run overrides: `--tasklist-filter=true|false`, `--tasklist-todo-stage=<name>`, `--tasklist-only-mine=true|false`.
 - **Plan-approval gate gains two new options:** *Promote an analyse-only task to implement* (flip one or more skipped tasks back to the implement set) and *Disable the tasklist filter for this run* (process everything regardless of stage/assignee).
 - Step 7 final summary now lists the filter activity and the analyse-only task IDs so the run report is honest about what was and was not implemented.
-- **Honest time logs in both directions (`round_threshold_minutes`, default `4`).** Up to v1.2.0 every entry rounded **up** to ≥ 5 min — a 30-second README typo fix got billed as 5, an 11-min hotfix as 15 (a 36 % over-bill). v1.3.0 splits the decision into two zones: elapsed below the threshold logs as raw minutes (1, 2, 3); elapsed at or above the threshold rounds to the **nearest** 5-min step. Concretely: 4 → 5, 5 → 5, 6 → 5, 7 → 5, 8 → 10, 9 → 10, 11 → 10, 12 → 10, 13 → 15, 14 → 15. Set the threshold equal to `time_rounding_minutes` (e.g. both `5`) to recover the pre-1.3.0 always-round-up behaviour.
+- **Honest time logs in both directions.** v1.3.0 rounded each entry to the **nearest** 5-minute step instead of always up (an 11-minute hotfix billed as 10, not 15). *Replaced in 1.9.0 by the `work-rules` rules — whole 5-minute blocks, quick tasks in one shared entry; see [What's new in 1.9.0](#whats-new-in-190).*
 - **Empty-result message for the tasklist filter.** If the v1.3.0 "To Do" + me filter ends up with 0 tasks to implement, the skill explains *which rules* produced the empty set, *per-task reasons*, and *most common causes*, then asks a focused prompt: disable the filter, pick analyse-only tasks to promote, change the stage name, toggle the assignee check off, or cancel. No more silent "skill did nothing" runs.
 - **Worktree handoff at end of run (Step 9.5).** When the skill executes inside a git worktree, every commit lands on the worktree's branch and never reaches `main` on its own. v1.3.0 asks at the end of the run what to do with those commits: *Merge into a target branch* (default — FF if possible, fall back to merge commit; target asked separately as parent / main / custom), *Push the branch for a PR*, *Leave as-is*, or *Cherry-pick specific commits*. On a successful merge the worktree branch + directory are removed by default. Disable with `--worktree-handoff=leave` or `"worktree_handoff": {"enabled": false}` for runs where you want the v1.2.x "leave it all in the worktree" behaviour back.
 
@@ -109,6 +117,7 @@ Full migration notes are in [`CHANGELOG.md`](CHANGELOG.md). The 1.1.0 migration 
   `https://<workspace>.teamwork.com/launchpad/apikey/manage` → *Create API Key*.
   See the [Teamwork API authentication docs](https://apidocs.teamwork.com/docs/teamwork/v3/getting-started/authentication) for details.
 - `curl` and `jq` available in your shell (preinstalled on macOS; on Linux: `apt install jq` / `brew install jq`).
+- The [`work-rules`](https://github.com/wamesk/claude-code-plugin-work-rules) plugin (skill `wame-time-logging`, the time-logging rules `wame-time-logging-v1`). It is declared in `dependencies`, so it installs together with this plugin; if it is missing, run `/plugin install work-rules@wame` — without it the plugin logs no time and lists the unlogged tasks in the summary.
 - `git` installed and configured.
 
 ## First run
@@ -147,8 +156,9 @@ Optional flags (override the saved config **for this run only**, not persisted):
 - `--plan-mode=overview` — generate a single tasklist-wide plan and ask for approval before any work (default).
 - `--plan-mode=per_task` — render and approve a plan **before each individual task**.
 - `--plan-mode=none` — skip planning approval entirely.
-- `--time-mode=real_rounded_5m` — measure actual elapsed time and round up to the nearest 5 minutes (default).
-- `--time-mode=ask` — ask after each task how many minutes to log; the measured value is suggested as the default.
+- `--time-mode=real_rounded_5m` — measure the actual time and log it by the `work-rules` rules: whole 5-minute blocks, quick tasks in one shared entry (default).
+- `--time-mode=ask` — before each time entry, ask how many minutes to log; the value the rules give is suggested, and the number you type is final.
+- `--log-from=HH:MM` — **v1.9.0**, the work started at `HH:MM` today (the same as *loguj od HH:MM* / *čas od HH:MM*): nothing is logged per task; at the end the span up to the current 5-minute block is split over the tasks by their estimates, shown as a table and written after your OK.
 - `--branching=current_branch` — commit on the current branch (default).
 - `--branching=new_feature_branch` — create `feature/teamwork-tasklist-<id>` (or `feature/teamwork-task-<id>`) and commit there.
 - `--auto-commit=always` — commit and log without prompting, no matter how risky the diff looks.
@@ -189,14 +199,15 @@ Optional flags (override the saved config **for this run only**, not persisted):
    - Runs relevant tests, if any.
    - Runs Pint formatting for PHP changes.
    - **Self-checks** its own diff against the applicable dimensions, fixes what is cheap, and records what stays open.
-   - Stops the timer, rounds the duration **up** to the configured minute step (default 5).
+   - Stops the timer — the measured minutes (rounded up to whole minutes) are what the task cost; nothing is rounded to blocks yet.
    - **Safety gate** — if the diff touches UI/template/styling files or exceeds the line threshold, asks whether to commit, inspect first, or abort the task. Trivial edits skip this prompt.
    - Commits using the `TYPE(scope)[<task-id>]: Message` convention (no `Co-Authored-By` lines).
-   - Logs time back to Teamwork via the API as a **sequential, non-overlapping** entry (see [Time logging behaviour](#time-logging-behaviour)) with a **business-oriented** Slovak description ending in `(commit: <short-hash>)`.
-   - **Moves the card to "Done - Local"** (fallbacks **"Internal testing"** → **"Testing"**) once the time log succeeds.
-   - Cleans up the attachment folder.
+   - Adds the task to the run's time **bundle** and writes one **sequential, non-overlapping** entry of whole 5-minute blocks once the bundle holds at least 5 minutes (see [Time logging behaviour](#time-logging-behaviour)), with a **business-oriented** Slovak description ending in `(commit: <short-hash>)` — a shared entry names every task in it.
+   - **Moves the card to "Done - Local"** (fallbacks **"Internal testing"** → **"Testing"**) once its time entry is written — a task waiting in the bundle moves when the bundle is written.
+   - Cleans up the attachment folder (with the time entry).
    - Optionally marks the task as completed in Teamwork.
-6. **Prints a summary table** (task ID, title, minutes, commit hash, TW status, **board stage**, **build quality**) with the open quality items per task, hands them to `/teamwork-task-test` when it is installed, and reminds you to `git push` manually.
+6. **Writes what is left of the bundle** — one 5-minute entry even for 1 minute of work; with `--log-from` the whole span split by estimates, after your OK.
+7. **Prints a summary table** (task ID, title, measured minutes, time entry, commit hash, TW status, **board stage**, **build quality**) and the time summary — where the cursor started, every entry, cut entries, tasks appended to an earlier entry and tasks with no entry and why — with the open quality items per task, hands them to `/teamwork-task-test` when it is installed, and reminds you to `git push` manually.
 
 ## Configuration reference
 
@@ -222,7 +233,7 @@ File: `~/.claude/plugins/data/teamwork-task-wamesk/config.json`
 | `test_frameworks.js_browser_preference`   | `auto`                                                                   | `auto`, `playwright`, or `cypress`. `auto` follows what `package.json` already declares.                                                                                              |
 | `test_visual_file_patterns`               | UI / template regex                                                      | Regex list applied to changed paths. A match classifies the task as a *visual change* (browser test preferred); no match means *backend change* (unit/feature test preferred).         |
 | `test_opt_out_keywords`                   | `["no tests", "skip tests", "without tests", "bez testov", "netreba testy"]` | Phrases in the task description that disable auto-propose for that task.                                                                                                          |
-| `time_cursor_strategy`                    | `last_teamwork_timelog`                                                  | `last_teamwork_timelog` (default — pick up from today's last timelog) or `floor_now` (always start at the rounding boundary of the skill's launch time).                              |
+| `time_cursor_strategy`                    | `last_teamwork_timelog`                                                  | `last_teamwork_timelog` (default — pick up at the end of your last own entry today) or `floor_now` (start at `floor(now)` unless an own entry ends later). Never starts inside an existing entry. |
 | `include_commit_hash_in_log_description`  | `true`                                                                   | Append ` (commit: <short-hash>)` to every Teamwork time-log description.                                                                                                               |
 | `board_workflow.enabled`                  | `true`                                                                   | Master toggle for board moves (in progress / done column). |
 | `board_workflow.in_progress_stage`        | `In progress`                                                            | Name of the column to move the card to when work starts. Match is case-insensitive, so it also resolves *In Progress* on the WAME board. |
@@ -230,10 +241,8 @@ File: `~/.claude/plugins/data/teamwork-task-wamesk/config.json`
 | `board_workflow.done_stage_fallbacks`     | `["Internal testing", "Testing"]`                                        | Tried in order if `done_stage` does not exist in the project's workflow (the older boards). First match wins. |
 | `board_workflow.done_stage_schema`        | `2`                                                                      | **v1.5.0** — migration marker, do not edit: records that the done-target migration ran, so choosing `Internal testing` again later is never undone. See [the board migration rule](#migration-rule-for-the-board-columns). |
 | `board_workflow.match_mode`               | `case_insensitive`                                                       | Reserved for future variants; today it is always case-insensitive.                                                                                                                     |
-| `time_mode`                               | `real_rounded_5m`                                                        | `real_rounded_5m` measures actual time; `ask` prompts after every task.                                                                                                                |
-| `time_rounding_minutes`                   | `5`                                                                      | Rounding step (minutes). Applies to both `real_rounded_5m` durations and the session cursor alignment.                                                                                |
-| `round_threshold_minutes`                 | `4`                                                                      | **v1.3.0** — elapsed `< threshold` logs as raw minutes (1, 2, 3); elapsed `>= threshold` rounds to the **nearest** `time_rounding_minutes` step. Set equal to `time_rounding_minutes` to recover the pre-1.3.0 always-round-up behaviour. Old name `round_up_threshold_minutes` is auto-migrated. |
-| `min_log_minutes`                         | `1`                                                                      | **v1.2.0** — smallest entry the skill will write. Lower than `round_threshold_minutes` enables the raw-minutes sub-round zone.                                                          |
+| `time_mode`                               | `real_rounded_5m`                                                        | `real_rounded_5m` logs the measured time by the `work-rules` rules; `ask` proposes every entry's minutes and takes the number you type as final.                                      |
+| `time_rounding_minutes`                   | `5`                                                                      | The **block** of the time-logging rules: every entry is whole blocks and starts on the block grid. Keep the WAME standard `5`. **1.9.0:** `round_threshold_minutes` and `min_log_minutes` are removed — the migration deletes them. |
 | `branching_mode`                          | `current_branch`                                                         | `current_branch` or `new_feature_branch`.                                                                                                                                              |
 | `default_language`                        | `sk`                                                                     | Language for the Teamwork time-log description (Slovak by default).                                                                                                                    |
 | `auto_complete_finished_tasks`            | `false`                                                                  | If `true`, the plugin marks each task as completed in TW after the commit + time log. Independent from board moves.                                                                    |
@@ -354,7 +363,7 @@ After the initial fetch and the tasklist-context lookup (Step 3.4), the plugin c
 ### Behavioural decisions baked in
 
 - **Parent stays put.** The parent is never moved across the workflow and gets no time log — it is a container, not a work item. When all its subtasks finish, the parent is **not** auto-clicked complete; close it manually if your team uses that convention.
-- **Per-subtask commits and time logs.** No aggregation into one parent timelog. Every subtask gets its own commit with its own ID in square brackets and its own 5-min-aligned timelog.
+- **Per-subtask commits and time logs.** No aggregation into one parent timelog. Every subtask gets its own commit with its own ID in square brackets and its own measured time; since 1.9.0 quick subtasks that fit one 5-minute block together share one entry whose description names each of them.
 - **Per-subtask board moves.** Each subtask has its own card and goes through *In progress → Done - Local* (or its fallback) independently.
 - **Filter applies to subtasks.** A subtask outside the start columns or assigned to a teammate is dropped to `analyse_only` by Step 3.45 with the same *start columns + me* rules as a standalone task.
 
@@ -495,7 +504,7 @@ A few hard rules:
 
 - The first run in a repo appends `/teamwork-task-*/` to your project's `.gitignore` and asks whether to commit that `.gitignore` change before starting work. Subsequent runs only touch `.gitignore` if the pattern is not already there.
 - Files larger than `max_attachment_size_mb` (default 25 MB) are **skipped** — listed in the plan and the final summary as *"skipped: file (size)"*, never downloaded.
-- After the time log succeeds, the attachment folder is removed per `attachments_cleanup` (default `after_timelog`). If the time log POST fails, the folder is intentionally **kept** so you can inspect what was being worked on.
+- After the task's time entry is written, the attachment folder is removed per `attachments_cleanup` (default `after_timelog`); a task waiting in the time bundle keeps it until the bundle is written. If the task ends with no entry (a failed POST, no room), the folder is intentionally **kept** so you can inspect what was being worked on.
 - Text-based files (`.md`, `.txt`, `.json`, `.yaml`, `.csv`, `.log`, source files, etc.) are read inline by Claude for additional context. Binary files (images, PDFs, archives) are listed in the plan but not opened.
 
 ## Smart auto-commit
@@ -559,7 +568,7 @@ When the skill auto-proposes tests, the implementation **and** the test file lan
 When `board_workflow.enabled=true` (default), the plugin moves the Teamwork card across the project's Kanban board as work progresses:
 
 - At the **start** of each task (right after the timer starts) → move to `board_workflow.in_progress_stage` (default `"In progress"`).
-- After the **time log succeeds** → move to `board_workflow.done_stage` (default **`"Done - Local"`** since 1.5.0). If that column does not exist in the project, the plugin tries the names in `board_workflow.done_stage_fallbacks` (default `["Internal testing", "Testing"]`) in order; first match wins.
+- After the task's **time entry is written** (a task waiting in the time bundle: when the bundle is written) → move to `board_workflow.done_stage` (default **`"Done - Local"`** since 1.5.0). If that column does not exist in the project, the plugin tries the names in `board_workflow.done_stage_fallbacks` (default `["Internal testing", "Testing"]`) in order; first match wins.
 
 Stage matching is **case-insensitive** — `"DONE - LOCAL"`, `"Done - Local"`, and `"done - local"` all match the same column, and the default `"In progress"` matches *In Progress* on the WAME board.
 
@@ -594,25 +603,96 @@ Examples: the 1.4.2 default (`"Internal testing"` + `["Testing"]`) and a config 
 
 ## Time logging behaviour
 
-Hard rules every entry the plugin writes to Teamwork obeys:
+Since 1.9.0 the plugin logs time by the WAME time-logging rules
+`wame-time-logging-v1` — the `wame-time-logging` skill of the
+[`work-rules`](https://github.com/wamesk/claude-code-plugin-work-rules) plugin,
+the one source for every plugin that writes time, whatever the tracker. The
+plugin loads the skill before the first time entry of a run and only adds the
+Teamwork details (own entries read with `assignedToUserIds`, `timeLogged` parsed
+as UTC, the `time` of a write in your local time). Where this README and the
+skill disagree, the skill wins. Without `work-rules` installed the plugin logs
+no time and lists the unlogged tasks in the summary.
 
-1. **Sequential, non-overlapping entries.** Even though implementation work can overlap in real time (parallel tool calls, interleaved investigations), the time **logged to Teamwork** is laid out strictly back-to-back. The plugin maintains a single *session cursor* that advances by exactly the logged duration after each entry. Result: if task A is logged as `start 10:15, 20 min`, task B will be logged as `start 10:35, …` — never `10:32`, never overlapping `10:25–10:45`.
-2. **Round-to-nearest beyond the threshold, raw below it (default 5 min step, 4 min threshold — v1.3.0).** The duration decision is split into two zones controlled by `round_threshold_minutes` (default `4`):
-   - **Elapsed at or above the threshold** rounds to the **nearest** `time_rounding_minutes` step using half-up integer rounding. With defaults (`threshold=4`, `ROUND=5`): 4 → 5, 5 → 5, 6 → 5, 7 → 5, 8 → 10, 9 → 10, 10 → 10, 11 → 10, 12 → 10, 13 → 15, 14 → 15, 15 → 15. This is honest in both directions — 7-min work bills as 5, 8-min work bills as 10. Over many tasks the bias averages out.
-   - **Elapsed strictly below the threshold but at least `min_log_minutes` (default 1)** logs as **raw minutes**. With defaults: 1 → 1, 2 → 2, 3 → 3. The cursor advances by the exact raw amount, so the next log starts off the 5-min grid (e.g. `:17`). This keeps a trivial-edit log honest at 1 min instead of padding it to 5.
-   - Set `round_threshold_minutes` equal to `time_rounding_minutes` (e.g. both `5`) to recover the pre-1.3.0 "always round up to ROUND" behaviour where every entry is ≥ 5 min and the cursor never falls off the 5-min grid.
-3. **Plan time is never logged.** The session cursor starts only after the plan is approved. Time spent on planning, reading the user's clarifications, or waiting for an `AskUserQuestion` response is **not** billed.
+Hard rules every entry obeys:
+
+1. **Whole 5-minute blocks on the 5-minute grid** (`time_rounding_minutes`,
+   default `5`) — 5, 10, 15 … minutes, starting at :00, :05, :10 … Never a
+   1–4-minute entry, never 7 or 13.
+2. **No overlaps.** Entries follow each other from a single *session cursor*
+   and never overlap an entry of yours from the same day — your own entries
+   are re-read right before every write, because another session may have
+   logged meanwhile.
+3. **Nothing ahead of the clock.** No entry ends after the end of the current
+   5-minute block (at most 4 minutes ahead of now).
+4. **Only committed work is logged.** Analyse-only, skipped and aborted tasks
+   get nothing; plan time and waiting for the plan approval are never logged.
+5. **No finished work disappears silently.** Every committed task ends up in
+   an entry (its own or a shared one) or is named in the summary with the
+   reason.
+
+How the minutes are decided:
+
+- The **measured minutes** of a task run from its timer start to the commit,
+  rounded up to whole minutes.
+- After each commit the task joins the run's **bundle**. Below 5 minutes the
+  bundle waits (and so does the task's move to *Done - Local*). At 5 minutes or
+  more it becomes **one entry of the nearest block, half up** (`7 → 5`,
+  `8 → 10`, `12 → 10`, `13 → 15`), on the task with the most measured minutes
+  (a tie: the task finished last).
+- At the **end of the run** a bundle that is not empty becomes one 5-minute
+  entry — even for 1 minute of work.
+- **Room** = the whole blocks between the cursor and the end of the current
+  block. An entry longer than the room is cut to it (`20 → 15 min — the cursor
+  reached the current block`, shown in the summary); with no room the bundle
+  waits. If there is still no room at the end of the run, its tasks are
+  appended to the run's last entry (`Patrí sem aj: #<id> <task> — <what was
+  done>`; the minutes stay), or — when the run wrote no entry — named in the
+  summary (`the timesheet is full until 10:15`).
+
+| Run (task: measured minutes), cursor 10:00 | Entries |
+|---|---|
+| A 1 | end of run: A 10:00–10:05 (5) |
+| A 2, B 2, C 2 | after C (6): C 10:00–10:05 (5), shared with A and B |
+| A 4, B 4 | after B (8): B 10:00–10:10 (10), shared with A |
+| A 3, B 20 | after B (23): B 10:00–10:25 (25), shared with A |
+| A 12 / A 13 | A 10:00–10:10 (10) / A 10:00–10:15 (15) |
+| A 7, B 1 | A 10:00–10:05 (5); end of run: B 10:05–10:10 (5) |
+| now 10:12, A 20 | A 10:00–10:15 (15), cut 20 → 15 |
 
 ### Time cursor strategy
 
 The session cursor's starting position is controlled by `time_cursor_strategy`:
 
-- **`last_teamwork_timelog`** (default) — pick up where you left off. The plugin asks the Teamwork API for the most recent timelog **from today** (via `GET /projects/api/v3/time.json?assignedToUserIds=<you>&startDate=<today>&orderBy=date&orderMode=desc&pageSize=1`) and uses its *end* timestamp (rounded up to the 5-minute boundary). If there is no log today, the cursor starts at `floor(skill-launch-time, 5min)`. Future timestamps (clock skew) and cross-midnight cases fall back to `floor(now)`.
-- **`floor_now`** — always start at `floor(skill-launch-time, 5min)`. Classic v1.0 behavior, useful if you keep parallel timesheets manually and don't want the plugin to discover them.
+- **`last_teamwork_timelog`** (default) — pick up where you left off: the end
+  of your latest own entry **from today** (read with
+  `GET /projects/api/v3/time.json?assignedToUserIds=<you>&startDate=<today>`),
+  moved up to the 5-minute grid (`10:03 → 10:05`). With no entry today the
+  cursor starts at `floor(now, 5 min)`.
+- **`floor_now`** — start at `floor(now, 5 min)`, unless one of your entries
+  today ends later; the cursor never starts inside an existing entry.
 
-The final summary prints which source was used (`last_timelog @ 10:50` or `skill start (first log of day)`), so you can always verify which strategy actually fired.
+An entry that ends **after now** (somebody logged ahead of the clock) still
+sets the cursor — 1.9.0 no longer falls back to `floor(now)` over it; the work
+waits until the clock gets there. Yesterday's entries never count. The summary
+prints where the cursor started and why (`last entry today ended 10:03 →
+10:05`, `first entry today → 10:00`, `user start 13:00 → 13:00`).
 
-If a `POST` to Teamwork fails (network blip, 5xx), the cursor does **not** advance — the next successful log keeps the same start time so your timesheet stays contiguous, **and** the corresponding move to the done column (*Done - Local* or its fallback) is skipped (the task is not yet billed).
+If a `POST` to Teamwork fails (network blip, 5xx), the cursor does **not**
+advance and nothing is retried blindly; the tasks of that entry are listed in
+the summary with their minutes, and their cards stay in *In progress*.
+
+### Start time (`--log-from=HH:MM`, *loguj od 13:00*)
+
+When you say when the work started, nothing is logged per task. At the end the
+span from that time (moved up to the grid) to the end of the current block is
+split over the committed tasks **in proportion to their estimates** (a task
+without an estimate counts with its measured minutes), by largest remainder. A
+task that gets no block is named in the entry with the most blocks. The plugin
+shows the split table and writes only after your OK. If one of your entries
+already lies inside the span, it stops and asks.
+
+Example: start 13:00, now 14:02 → 13 blocks; estimates A 60, B 30, C 15 →
+A 13:00–13:35, B 13:35–13:55, C 13:55–14:05.
 
 ## Time-log description tone
 
@@ -626,12 +706,21 @@ The text that lands in Teamwork's time-log description is written from the persp
 - *„Refactored InvoiceController::export() to use new DompdfRenderer, added 3 tests."*
 - *„Updated 8 files, +142 −37 lines, bumped filament/filament to 5.2."*
 
+An entry that holds two or more tasks is a **shared entry**: the first line says so and gives the real work time, then one line per task — the task the entry is logged on first, the rest in the order they were done:
+
+```
+Spoločný záznam za 3 úlohy (spolu 6 min práce):
+#45522728 Priradenie úlohy viacerým ľuďom — úlohu možno zadať viacerým ľuďom naraz (commit: c0bda4a)
+#45522670 Hashované heslo IMAP — akcia Test pripojenia pomenuje hashované heslo (commit: 26a0001)
+#45522683 Neznámy kód poschodia — import nahlási neznámy kód poschodia (commit: 03053ce)
+```
+
 ## Time tracking modes
 
-- **`real_rounded_5m` (default)** — the plugin measures wall-clock time between starting the task and the commit, then rounds **up** to the nearest `time_rounding_minutes`. Best for billable work where you trust the measurement.
-- **`ask`** — after each commit, the plugin asks you how many minutes to log, with the measured value prefilled. Use this when you frequently take long breaks, multitask, or want explicit control.
+- **`real_rounded_5m` (default)** — the plugin measures wall-clock time between starting the task and the commit and logs it by the rules above — whole 5-minute blocks, quick tasks in one shared entry — without asking.
+- **`ask`** — before each time entry the plugin asks how many minutes to log, with the value the rules give prefilled. The number you type is final; one that is not whole 5-minute blocks is noted in the summary. Use this when you frequently take long breaks, multitask, or want explicit control.
 
-Either mode still feeds into the sequential, 5-minute-aligned session cursor above — `ask` only lets you override the measured duration, not the start time.
+Either mode uses the same session cursor — `ask` only lets you override the minutes, not the start time.
 
 ## Branching modes
 

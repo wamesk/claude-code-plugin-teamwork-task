@@ -1,7 +1,7 @@
 ---
 name: teamwork-task
-description: "Use when the user provides a Teamwork.com URL (tasklist or task) and asks to 'work on these tasks', 'urob tasky z teamworku', 'spracuj tasky z teamwork', 'vypracuj tasky z teamworku', or invokes '/teamwork-task'. Fetches the tasks via the Teamwork REST API v3 (description, attachments, comments), scans the working tree for unattached specs and asks before using them, pauses on a gating phrase instead of inventing data, implements the tasks one by one in the current repository with a self-check for UI/UX, performance, security, page reachability and framework idioms, moves each task on the board (In progress, then Done - Local), commits per task as TYPE(scope)[task-id]: Message, and logs sequential 5-minute-aligned time back to Teamwork. For a tasklist URL only tasks in a start column ('Ready for Development' or 'To Do') and assigned to the current user are implemented; the rest are analysed read-only. Hands off to teamwork-task-test when installed. Asks on blockers, never pushes."
-argument-hint: "<teamwork-url> [--time-mode=real_rounded_5m|ask] [--branching=current_branch|new_feature_branch] [--plan-mode=overview|per_task|none] [--auto-commit=always|when_safe|never] [--local-discovery=true|false] [--readiness-gate=true|false] [--test-after=true|false] [--worktree-cleanup=true|false|ask] [--worktree-handoff=ask|merge|push|leave] [--worktree-target=ask|parent|main|<branch>] [--tasklist-filter=true|false] [--tasklist-todo-stage=<name>[,<name>…]] [--tasklist-only-mine=true|false] [--subtasks=true|false] [--dimensions=ui_ux,performance,security,reachability,framework|none] [--mode=fast|full]"
+description: "Use when the user provides a Teamwork.com URL (tasklist or task) and asks to 'work on these tasks', 'urob tasky z teamworku', 'spracuj tasky z teamwork', 'vypracuj tasky z teamworku', or invokes '/teamwork-task'. Fetches the tasks via the Teamwork REST API v3 (description, attachments, comments), scans the working tree for unattached specs and asks before using them, pauses on a gating phrase instead of inventing data, implements the tasks one by one in the current repo with a self-check for UI/UX, performance, security, page reachability and framework idioms, moves each task on the board (In progress, then Done - Local), commits per task as TYPE(scope)[task-id]: Message, and logs time to Teamwork in whole 5-minute blocks (work-rules), quick tasks in one entry. For a tasklist URL only tasks in a start column ('Ready for Development' or 'To Do') and assigned to the current user are implemented; the rest are analysed read-only. Hands off to teamwork-task-test when installed. Asks on blockers, never pushes."
+argument-hint: "<teamwork-url> [--time-mode=real_rounded_5m|ask] [--branching=current_branch|new_feature_branch] [--plan-mode=overview|per_task|none] [--auto-commit=always|when_safe|never] [--local-discovery=true|false] [--readiness-gate=true|false] [--test-after=true|false] [--worktree-cleanup=true|false|ask] [--worktree-handoff=ask|merge|push|leave] [--worktree-target=ask|parent|main|<branch>] [--tasklist-filter=true|false] [--tasklist-todo-stage=<name>[,<name>…]] [--tasklist-only-mine=true|false] [--subtasks=true|false] [--dimensions=ui_ux,performance,security,reachability,framework|none] [--mode=fast|full] [--log-from=HH:MM]"
 allowed-tools: [Bash, Read, Write, Edit, Grep, Glob, AskUserQuestion, Skill]
 ---
 
@@ -61,11 +61,11 @@ no board moves) before; keep them when editing this file:
   that read Teamwork data or run state start with the *run preamble* (Step 3)
   that re-derives `CONFIG_FILE`, `AUTH`, `BASE`, `ENTITY_ID` and
   `TW_JOB_DIR=/tmp/tw_job_<ENTITY_ID>`; tables shared between steps live in
-  `TW_JOB_DIR` or `/tmp/tw_*_<ENTITY_ID>.tsv`. The few scalars the worker
-  loop still carries between calls (`USER_ID`, `START_TS`,
-  `SESSION_CURSOR_TS`, `DURATION_MIN`, the Step 7 accounting lists) are
-  remembered by you, the executor, and written literally into the next
-  snippet — never assumed to survive on their own.
+  `TW_JOB_DIR` or `/tmp/tw_*_<ENTITY_ID>.tsv` — the time cursor, the bundle
+  and the entries of the run included (Step 5.5). The few scalars the worker
+  loop still carries between calls (`USER_ID`, `START_TS`, `MEASURED_MIN`,
+  `COMMIT_HASH`) are remembered by you, the executor, and written literally
+  into the next snippet — never assumed to survive on their own.
 
 ---
 
@@ -78,7 +78,8 @@ Recognized URL shapes:
 - Tasklist: `https://<workspace>.teamwork.com/app/tasklists/<tasklistId>` (also legacy `/tasklists/<id>`)
 
 Optional flags (override config for this run only — not persisted):
-- `--time-mode=real_rounded_5m` | `--time-mode=ask`
+- `--time-mode=real_rounded_5m` | `--time-mode=ask` — `real_rounded_5m` (default) logs the measured time by the `work-rules` time-logging rules (whole 5-minute blocks, quick tasks in one shared entry — Step 5.5); `ask` proposes every entry's minutes first and takes the number the user types as final (Step 6.8)
+- `--log-from=HH:MM` — **v1.9.0**, the work started at `HH:MM` today: nothing is logged per task; at the end the span from `HH:MM` (moved up to the 5-minute grid) to the end of the current 5-minute block is split over the committed tasks by their estimates, shown as a table and written after the user's OK (Steps 5.5, 6.12b). The same as saying *„loguj od HH:MM“* or *„čas od HH:MM“* in the message that starts the run
 - `--branching=current_branch` | `--branching=new_feature_branch`
 - `--plan-mode=overview` | `--plan-mode=per_task` | `--plan-mode=none`
 - `--auto-commit=always` | `--auto-commit=when_safe` | `--auto-commit=never`
@@ -152,7 +153,7 @@ Algorithm:
    chmod 600 "$CONFIG_FILE"
    ```
 
-6. **Apply CLI flag overrides** to in-memory config (`--time-mode`, `--branching`, `--plan-mode`, `--auto-commit`, `--dimensions`, `--mode`, …) — do not persist them. Resolve the work mode (Step 2.65) first and apply the individual flags after it, so an explicit flag wins over what `fast` implies. `--dimensions=none` means an empty active set; `--dimensions=ui_ux,security` keeps only the listed known keys.
+6. **Apply CLI flag overrides** to in-memory config (`--time-mode`, `--branching`, `--plan-mode`, `--auto-commit`, `--dimensions`, `--mode`, …) — do not persist them. `--log-from=HH:MM` (or *„loguj od HH:MM“* / *„čas od HH:MM“* in the user's message) is not a config key: carry the time into the `LOG_FROM` line of Step 5.5b. Resolve the work mode (Step 2.65) first and apply the individual flags after it, so an explicit flag wins over what `fast` implies. `--dimensions=none` means an empty active set; `--dimensions=ui_ux,security` keeps only the listed known keys.
 
 7. **Never echo the API token** in shell output. When invoking `curl`, pass auth via `-u` to keep it out of `ps`.
 
@@ -204,16 +205,11 @@ jq '
   (.include_commit_hash_in_log_description |= if . == null then true else . end) |
   (.time_mode //= "real_rounded_5m") |
   (.time_rounding_minutes //= 5) |
-  (.min_log_minutes //= 1) |
-  # One-shot rename for users who tested an early 1.3.0 build with the
-  # old `round_up_threshold_minutes` name. The key was never on a released
-  # tag, so this rename is best-effort cleanup — no fallback if both keys
-  # somehow co-exist (the new name wins).
-  (if has("round_up_threshold_minutes") and (has("round_threshold_minutes") | not)
-   then .round_threshold_minutes = .round_up_threshold_minutes
-        | del(.round_up_threshold_minutes)
-   else . end) |
-  (.round_threshold_minutes //= 4) |
+  # v1.9.0: time follows work-rules:wame-time-logging — whole blocks only.
+  # The sub-block keys of 1.2.0 / 1.3.0 (and the early-1.3.0 name) are
+  # obsolete: delete them. Deleting an absent key is a no-op, so this stays
+  # idempotent; the sibling plugins sharing this file never re-add them.
+  del(.min_log_minutes, .round_threshold_minutes, .round_up_threshold_minutes) |
   (.branching_mode //= "current_branch") |
   (.default_language //= "sk") |
   (.auto_complete_finished_tasks //= false) |
@@ -342,7 +338,7 @@ jq '
 chmod 600 "$CONFIG_FILE"
 ```
 
-The migration is idempotent — running it twice produces the same file. Do not print the config to stdout; only mention "config migrated to 1.5.0 schema" once if any change was made.
+The migration is idempotent — running it twice produces the same file. Do not print the config to stdout; only mention "config migrated to 1.9.0 schema" once if any change was made.
 
 The `build_quality` key (added in 1.5.0) controls the build-time quality rules —
 Step 6.2 decides per task which of the five dimensions (`ui_ux`, `performance`,
@@ -412,39 +408,25 @@ The `readiness_gate` key (added in 1.1.3) controls Step 6.0 — detecting phrase
 
 The `worktree_cleanup` key (added in 1.2.0) controls Step 10 — at the end of a successful run, scan the repo for other git worktrees (typically `.claude/worktrees/<name>` left behind by prior background jobs) and offer to delete the ones that are clean and merged into the default branch. Default is `true`. Disable per run with `--worktree-cleanup=false`.
 
-The `min_log_minutes` key (added in 1.2.0) controls Step 6.6.1 — when the real-time headroom between the session cursor and `now()` is smaller than `time_rounding_minutes` (default 5) but at least `min_log_minutes` (default 1), the skill writes a smaller-than-round timelog entry instead of skipping the task entirely. The cursor still advances by the exact logged amount, so the next log resumes seamlessly. Set `min_log_minutes` to the same value as `time_rounding_minutes` to keep the legacy v1.1.x "5-min minimum or skip" behaviour.
+The time keys (rules `wame-time-logging-v1` from `work-rules`, Step 5.5):
+- `time_rounding_minutes` (default `5`) — the **block**: every entry is whole
+  blocks and starts on the block grid. Keep the WAME standard `5`.
+- `time_mode` (default `real_rounded_5m`) — `real_rounded_5m` logs the
+  measured time by the rules without asking; `ask` proposes each entry's
+  minutes first and takes the number the user types as final (Step 6.8).
+- `time_cursor_strategy` (default `last_teamwork_timelog`) — where the cursor
+  starts: at the end of your latest own entry today, or (`floor_now`) at
+  `floor(now)` unless an own entry ends later (Step 5.5b).
+- `include_commit_hash_in_log_description`, `is_billable_by_default` — the
+  description suffix and the billable flag of every entry.
 
-The `round_threshold_minutes` key (added in 1.3.0) decouples the rounding
-decision from how the skill treats short runs in Step 6.6. **Elapsed time
-strictly below this threshold is logged as raw minutes** (1, 2, or 3 min for
-the default `4`), while elapsed time *at or above* the threshold is rounded
-to the **nearest** `time_rounding_minutes` step using half-up integer
-rounding. With the defaults (`threshold=4`, `ROUND=5`):
-
-| elapsed | logged | reason                       |
-| ------- | ------ | ---------------------------- |
-| 1–3 min | 1–3    | below threshold — raw        |
-| 4 min   | 5      | nearest multiple of 5        |
-| 5 min   | 5      | exact                        |
-| 6 min   | 5      | 6 is closer to 5 than to 10  |
-| 7 min   | 5      | 7 is closer to 5 than to 10  |
-| 8 min   | 10     | 8 is closer to 10            |
-| 11 min  | 10     | 11 is closer to 10 than to 15 |
-| 12 min  | 10     | 12 is closer to 10           |
-| 13 min  | 15     | 13 is closer to 15           |
-
-The motivation is honest billing in both directions: a 30-second
-documentation tweak should not be billed as 5 minutes (handled by the
-sub-round zone), and an 11-minute hotfix should not be padded to 15 just
-because the previous policy was "always round up" (handled by the
-round-to-nearest zone). Set `round_threshold_minutes` equal to
-`time_rounding_minutes` to recover the pre-1.3.0 "everything rounds up to
-ROUND" behaviour (every entry will be ≥ 5 min and bias upward). Set it to
-`1` to apply nearest-rounding to every entry and disable the sub-round
-raw-minutes zone entirely. Note: the **old key name**
-`round_up_threshold_minutes` from early 1.3.0 builds is silently renamed
-to `round_threshold_minutes` by the Step 2.6 migration; the value is
-preserved.
+**Removed in 1.9.0:** `min_log_minutes` (1.2.0) and `round_threshold_minutes`
+(1.3.0; early name `round_up_threshold_minutes`). They wrote 1–3-minute
+entries for short work and cut an entry to the exact free minutes (a 7-minute
+entry), which put QA entries of 2–3 minutes on the timesheet. The rules now
+log whole blocks only: quick tasks are merged into one shared entry, and a
+leftover of even 1 minute is one block. The Step 2.6 migration deletes the
+three keys; a value in an older file is ignored.
 
 The `tasklist_filter` key (added in 1.3.0) controls Step 3.45 — when the user
 hands a **tasklist** URL, the skill only implements tasks that are (a) currently
@@ -639,7 +621,10 @@ Treat the empty case as **non-fatal**:
 - Step 3.45 falls back to "stage filter only" (skip the assignee check) so the
   user is never silently locked out of their own tasklist by a missing
   permission.
-- Step 5.5 falls back to `floor(now)` as it already does today.
+- Step 5.5 cannot read your own entries without the id, so no overlap can be
+  ruled out: time logging is off for this run (`time_logging=off`), and
+  Step 7 lists every committed task with its measured minutes. Step 5.5
+  retries `/me.json` once before it gives up.
 
 Do not echo the token in the error message even when the call fails — leave
 the token entirely out of stdout/stderr.
@@ -1079,8 +1064,10 @@ board move, time log — exactly like a standalone task.
   the workflow and gets **no time log**. It is just a container — the subtasks
   carry the actual work.
 - **Per-subtask commits and time logs.** Each subtask gets its own
-  `TYPE(scope)[<subtaskId>]: …` commit and its own `POST /tasks/{subtaskId}/time.json`
-  entry (sequential, non-overlapping, per Step 5.5 cursor).
+  `TYPE(scope)[<subtaskId>]: …` commit and its own measured time. The time is
+  logged by the Step 6.8 bundle — an entry on the subtask, or a shared entry
+  when quick subtasks fit one 5-minute block together (sequential,
+  non-overlapping, per the Step 5.5 cursor).
 - **Per-subtask board moves.** Each subtask moves itself
   *In progress → Done - Local* (fallbacks *Internal testing* → *Testing*) on
   its own board.
@@ -2393,36 +2380,127 @@ Why up here in Step 5 rather than next to Step 10:
 - If `WT_RUN_IN_WORKTREE=0`, the rest of this section is skipped and Step
   9.5 turns into a no-op.
 
-### Step 5.5 — Initialize the session time cursor
+### Step 5.5 — Time-logging rules and the session cursor
 
-Time logs in Teamwork **must not overlap** even if implementation work overlaps in real time. The plugin maintains a **session cursor** that advances strictly forward as each task is logged, so the resulting time entries are contiguous (no gaps, no overlaps) and every entry's start time is aligned to the rounding step (default 5 minutes).
+**The rules come from `work-rules`.** Every time entry this skill writes
+follows the WAME time-logging rules `wame-time-logging-v1`, kept in the
+`wame-time-logging` skill of the `work-rules` plugin — one source for every
+plugin that writes time, whatever the tracker. Before the first time entry of
+the run — here, once, after the plan is approved and before the worker loop —
+load it with the Skill tool (`work-rules:wame-time-logging`). This plugin
+declares `work-rules` in `dependencies`, so it is installed with it. If the
+skill is still not in the available-skills list, **log no time in this run**:
+print `⚠ Time is not logged — the work-rules plugin is missing; run /plugin install work-rules@wame`,
+run Step 5.5b with `RULES_LOADED=0`, and Step 7 lists every committed task as
+unlogged with its measured minutes. Never log from memory or from an older
+copy of the rules.
 
-The cursor's starting position depends on `time_cursor_strategy`:
+Steps 5.5, 6.6, 6.8, 6.8.5 and 6.12 implement those rules for Teamwork;
+**where they disagree, the skill wins.** The rules in five lines:
 
-- **`floor_now`** — start at `floor(now, ROUND)`. Classic v1.0 behavior.
-- **`last_teamwork_timelog`** (default) — start at the end of today's most recent timelog by the current user, so the run *picks up where you left off*. Falls back to `floor(now)` when there is no log today.
+- every entry is whole blocks (`time_rounding_minutes`, default 5) and starts
+  on the grid (…:00, :05, :10) — never a 1–4-minute entry, never 7 or 13;
+- no entry overlaps an own entry of the same day, and none ends after the
+  **limit** — the end of the block that contains *now*, `ceil(now, block)`;
+- a committed task joins the run's **bundle**; the bundle becomes one entry as
+  soon as it holds one block of work, on the task with the most measured
+  minutes, with a description that names every task in it (Step 6.8);
+- a bundle still open at the end of the run is written as one block, even for
+  1 minute of work (Step 6.12);
+- with a start time from the user nothing is logged per task — the span is
+  split by the estimates at the end (Step 6.12b).
 
-Initialize the cursor **once**, right before the worker loop starts (after plan approval — plan time is not billed):
+**Teamwork adapter** (rules section 10). Own entries are read with
+`GET /projects/api/v3/time.json?assignedToUserIds=<me>` — never `userId`,
+which silently returns the whole company. `timeLogged` comes back in UTC and
+is parsed as UTC; the `date` / `time` of a write are the user's local time
+(TIMEZONE CONTRACT below). Entries are created with
+`POST /projects/api/v3/tasks/{id}/time.json` and edited with
+`PATCH /projects/api/v3/time/{id}.json`.
+
+**Run files.** The time state lives in `TW_JOB_DIR` — never in a fixed `/tmp`
+path (two sessions can run this skill at once) and never in a shell variable:
+
+| File | Content | Written by |
+| --- | --- | --- |
+| `timelog_lib.sh` | the helpers of Step 5.5a, sourced by every time snippet | 5.5a |
+| `time_logging` | `bundle`, `log_from` or `off` | 5.5b |
+| `cursor` · `cursor_source` | cursor epoch · where it started and why (Step 7) | 5.5b, 6.8 |
+| `log_from_start` | start of the span in start-time mode (epoch, on the grid) | 5.5b, 6.12b |
+| `bundle.tsv` | `taskId<TAB>measuredMin<TAB>estimateMin<TAB>commit<TAB>title<TAB>what was done` — committed work without an entry, in finishing order | 6.8 |
+| `log_from_tasks.tsv` | the same rows in start-time mode | 6.8 |
+| `entries.tsv` | `timelogId<TAB>startEpoch<TAB>minutes<TAB>ownerId<TAB>otherIds<TAB>note` — the entries this run wrote | 6.8, 6.12b |
+| `last_entry.id` · `last_entry.desc` | the last entry this run wrote and its description | 6.8, 6.12b |
+| `time_merged.tsv` | `taskId<TAB>timelogId` — tasks appended to an earlier entry | 6.12 |
+| `time_unlogged.tsv` | `taskId<TAB>measuredMin<TAB>reason` — committed tasks with no entry | 6.8, 6.12 |
+| `done_moves.txt` | ids whose entry was just written — moved and cleaned up by 6.8.5 / 6.9 | 6.8, 6.12 |
+| `board_stage.tsv` | `taskId<TAB>column` after each board move | 6.1.5, 6.8.5 |
+
+**Step 5.5a — helpers.** Write them once. Every later time snippet sources the
+file, so the arithmetic, the timesheet read and the writes exist exactly once:
 
 ```bash
 # (run preamble — see Step 3)
-USER_ID="<USER_ID from Step 2.7, empty if unresolved>"
-ROUND=$(jq -r '.time_rounding_minutes // 5' "$CONFIG_FILE")
-ROUND_SECS=$(( ROUND * 60 ))
-STRATEGY=$(jq -r '.time_cursor_strategy // "last_teamwork_timelog"' "$CONFIG_FILE")
+# Step 5.5a — time-logging helpers
+cat > "$TW_JOB_DIR/timelog_lib.sh" <<'TWLIB'
+# teamwork-task — time-logging helpers for the rules wame-time-logging-v1.
+# Sourced by Steps 5.5b, 6.8, 6.12b and 7; zsh 5.9 and bash 3.2 safe.
+# Needs CONFIG_FILE, AUTH, BASE and TW_JOB_DIR (run preamble) and USER_ID.
 
-NOW_TS=$(date +%s)
-TODAY=$(date +%Y-%m-%d)
+BLOCK=$(jq -r '.time_rounding_minutes // 5' "$CONFIG_FILE")
+case "$BLOCK" in ''|*[!0-9]*|0) BLOCK=5 ;; esac
+TW_LANG=$(jq -r '.default_language // "sk"' "$CONFIG_FILE")
+TW_HASH=$(jq -r '.include_commit_hash_in_log_description | if . == null then true else . end' "$CONFIG_FILE")
+TW_BILLABLE=$(jq -r '.is_billable_by_default | if . == null then true else . end' "$CONFIG_FILE")
 
-floor_now() { echo $(( NOW_TS - (NOW_TS % ROUND_SECS) )); }
+# LOCAL clock of an absolute epoch — what the `date` / `time` of a write expect.
+tw_hm()  { date -r "$1" +%H:%M    2>/dev/null || date -d "@$1" +%H:%M; }
+tw_hms() { date -r "$1" +%H:%M:%S 2>/dev/null || date -d "@$1" +%H:%M:%S; }
+tw_day() { date -r "$1" +%Y-%m-%d 2>/dev/null || date -d "@$1" +%Y-%m-%d; }
 
-# Cross-platform epoch parser for ISO8601 timestamps.
-# Teamwork v3 returns timeLogged in several shapes depending on the endpoint —
-# e.g. `2026-05-27T08:15:00Z`, `2026-05-27T08:15:00+00:00`, or with fractional
-# seconds. Normalise first (strip `.NNN`, swap `+00:00` for `Z`), then try
-# macOS `date -j -f`, GNU `date -d`, and a Python one-liner fallback for
-# anything weirder. Returns empty string on total failure (cursor falls back
-# to floor_now upstream).
+# The grid: whole blocks after midnight. Up = ceil, down = floor.
+tw_grid_up()   { echo $(( ( ($1 + BLOCK * 60 - 1) / (BLOCK * 60) ) * BLOCK * 60 )); }
+tw_grid_down() { echo $(( ($1 / (BLOCK * 60)) * BLOCK * 60 )); }
+
+# Minutes of one entry for $1 measured minutes (rules section 3): the nearest
+# block, half up (5→5, 7→5, 8→10, 12→10, 13→15). Below one block: 0 = hold
+# while the run goes on, one block at the end of the run ($2 = 1).
+tw_entry_minutes() {
+  if [ "$1" -ge "$BLOCK" ]; then
+    echo $(( (($1 + BLOCK / 2) / BLOCK) * BLOCK ))
+  elif [ "$2" = "1" ] && [ "$1" -gt 0 ]; then
+    echo "$BLOCK"
+  else
+    echo 0
+  fi
+}
+
+# Room in minutes (whole blocks) from the cursor $1 to the limit — the end of
+# the block that contains now ($2). Never negative.
+tw_room() {
+  local limit room
+  limit=$(tw_grid_up "$2")
+  room=$(( (limit - $1) / (BLOCK * 60) * BLOCK ))
+  if [ "$room" -lt 0 ]; then room=0; fi
+  echo "$room"
+}
+
+# Epoch of HH:MM (or H:MM) today, local time; empty when it is not a time.
+tw_parse_hhmm() {
+  local t
+  t=$1
+  case "$t" in [0-9]:[0-5][0-9]) t="0$t" ;; esac
+  case "$t" in
+    [01][0-9]:[0-5][0-9]|2[0-3]:[0-5][0-9])
+      date -j -f '%Y-%m-%d %H:%M:%S' "$(date +%Y-%m-%d) ${t}:00" +%s 2>/dev/null \
+        || date -d "$(date +%Y-%m-%d) ${t}" +%s 2>/dev/null ;;
+  esac
+}
+
+# Cross-platform epoch parser for ISO8601 timestamps. Teamwork v3 returns
+# timeLogged as `2026-05-27T08:15:00Z`, `2026-05-27T08:15:00+00:00` or with
+# fractional seconds. Normalise first (strip `.NNN`, swap `+00:00` for `Z`),
+# then try macOS `date -j -f`, GNU `date -d` and Python. Empty on failure.
 #
 # TIMEZONE CONTRACT (critical — do not "fix" by formatting POST times in UTC):
 #   * Teamwork RETURNS `timeLogged` in UTC (trailing `Z`). It must be parsed AS
@@ -2431,30 +2509,26 @@ floor_now() { echo $(( NOW_TS - (NOW_TS % ROUND_SECS) )); }
 #     without `-u` BSD `date` reads the wall-clock as LOCAL and the epoch is
 #     wrong by the local offset).
 #   * Teamwork ACCEPTS the POST/PATCH `time` field in the user's PROFILE/LOCAL
-#     timezone, not UTC. So the cursor epoch (absolute) is later formatted for
-#     the POST with LOCAL `date -r "$TS" +%H:%M:%S` (Step 6.8) — NEVER with
+#     timezone, not UTC. So the cursor epoch (absolute) is formatted for the
+#     POST with LOCAL `date -r "$TS" +%H:%M:%S` (tw_hms) — NEVER with
 #     `date -ju`/`date -u`. Parsing UTC but posting local is intentional and
 #     correct; mixing them up shifts every entry by the local offset and makes
 #     logs overlap.
-parse_iso() {
+tw_parse_iso() {
   local raw norm out
   raw="$1"
-  # Strip any millisecond fraction; normalise `+00:00` (and the rare `-00:00`) to `Z`.
   norm=$(printf '%s' "$raw" \
     | sed -E 's/\.[0-9]+(Z|[+-][0-9:]{2,5})?$/\1/' \
     | sed -E 's/[+-]00:?00$/Z/')
-
-  # macOS BSD date — UTC `Z` form. `-u` is REQUIRED: the trailing `Z` is a
-  # literal in the format string, so without `-u` the time is read as LOCAL.
+  # macOS BSD date — UTC `Z` form; `-u` is REQUIRED (see the contract above).
   out=$(date -ju -f "%Y-%m-%dT%H:%M:%SZ" "$norm" +%s 2>/dev/null) && \
     { [ -n "$out" ] && echo "$out" && return 0; }
-  # macOS BSD date — form with explicit zone `%z`
+  # macOS BSD date — explicit zone `%z`
   out=$(date -j -f "%Y-%m-%dT%H:%M:%S%z" "$raw" +%s 2>/dev/null) && \
     { [ -n "$out" ] && echo "$out" && return 0; }
   # GNU date — accepts both shapes natively
   out=$(date -d "$raw" +%s 2>/dev/null) && \
     { [ -n "$out" ] && echo "$out" && return 0; }
-  # Last resort: Python (present on macOS by default as `python3`)
   out=$(python3 - "$raw" <<'PY' 2>/dev/null
 import sys, datetime
 s = sys.argv[1].replace('Z', '+00:00')
@@ -2468,71 +2542,234 @@ PY
   echo ""
 }
 
-SESSION_CURSOR_TS=""
-TIME_CURSOR_SOURCE=""
+# Own entries that start today, one `startEpoch<TAB>endEpoch` line each.
+# Status 1 (after a ⚠ line) when the timesheet cannot be read.
+tw_own_entries_today() {
+  local today resp http rows row logged mins ts
+  if [ -z "$USER_ID" ]; then
+    echo "  ⚠ Teamwork user unknown — own entries cannot be read" >&2
+    return 1
+  fi
+  today=$(date +%Y-%m-%d)
+  resp=$(curl -sS -u "$AUTH" -H "Accept: application/json" -w '\n%{http_code}' \
+    "${BASE}/projects/api/v3/time.json?assignedToUserIds=${USER_ID}&startDate=${today}&orderBy=date&orderMode=desc&pageSize=100")
+  http=${resp##*$'\n'}; resp=${resp%$'\n'*}
+  if [ "$http" != "200" ]; then
+    echo "  ⚠ GET /projects/api/v3/time.json → HTTP ${http}" >&2
+    return 1
+  fi
+  if ! rows=$(jq -r '.timelogs[]? | [(.timeLogged // ""), ((.minutes // 0) | tostring)] | @tsv' <<<"$resp"); then
+    echo "  ⚠ GET /projects/api/v3/time.json → not valid JSON" >&2
+    return 1
+  fi
+  while IFS= read -r row; do
+    logged=${row%%$'\t'*}; mins=${row##*$'\t'}
+    [ -n "$logged" ] || continue
+    ts=$(tw_parse_iso "$logged")
+    [ -n "$ts" ] || continue
+    # `startDate` lets later days through; no carry-over from yesterday either.
+    [ "$(tw_day "$ts")" = "$today" ] || continue
+    printf '%s\t%s\n' "$ts" $(( ts + mins * 60 ))
+  done <<<"$rows"
+  return 0
+}
 
-case "$STRATEGY" in
-  last_teamwork_timelog)
-    # USER_ID was resolved once in Step 2.7 and cached for the whole run; reuse it.
-    # (Pre-1.3.0 this step fetched /me.json itself — kept the call only as a fallback
-    # below in case the earlier resolution failed.)
-    if [ -z "$USER_ID" ]; then
-      USER_ID=$(curl -sS -u "$AUTH" -H "Accept: application/json" \
-        "${BASE}/me.json" | jq -r '.person.id // empty')
-    fi
+# End (epoch, not on the grid) of the latest-ending own entry today — empty
+# when there is none. Status 1 when the timesheet cannot be read.
+tw_last_own_end() {
+  local rows
+  rows=$(tw_own_entries_today) || return 1
+  awk -F '\t' '$2 > m { m = $2 } END { if (m != "") print m }' <<<"$rows"
+}
 
-    if [ -n "$USER_ID" ]; then
-      # 2. Get most recent timelog of TODAY for that user
-      RESP=$(curl -sS -u "$AUTH" -H "Accept: application/json" -w '\n%{http_code}' \
-        "${BASE}/projects/api/v3/time.json?assignedToUserIds=${USER_ID}&pageSize=1&orderBy=date&orderMode=desc&startDate=${TODAY}")
-      HTTP=${RESP##*$'\n'}; RESP=${RESP%$'\n'*}
+# Description of one entry from a rows file (bundle.tsv shape), owner $2
+# (rules section 4). One task: its own sentence. Two or more: a shared entry —
+# a header with the real work time, then one line per task, the owner first,
+# the rest in the order they were done.
+tw_describe() {
+  local n total head
+  n=$(awk 'END { print NR }' "$1")
+  if [ "$n" -le 1 ]; then
+    awk -F '\t' -v h="$TW_HASH" '{ d = $6; if (h == "true" && $4 != "-") d = d " (commit: " $4 ")"; print d }' "$1"
+    return 0
+  fi
+  total=$(awk -F '\t' '{ s += $2 } END { print s + 0 }' "$1")
+  if [ "$TW_LANG" = "en" ]; then head="Shared entry for ${n} tasks (${total} min of work in total):"
+  elif [ "$n" -ge 5 ]; then head="Spoločný záznam za ${n} úloh (spolu ${total} min práce):"
+  else head="Spoločný záznam za ${n} úlohy (spolu ${total} min práce):"
+  fi
+  printf '%s\n' "$head"
+  awk -F '\t' -v o="$2" -v h="$TW_HASH" '
+    { d = "#" $1 " " $5 " — " $6; if (h == "true" && $4 != "-") d = d " (commit: " $4 ")" }
+    $1 == o { first = d; next }
+    { rest = rest "\n" d }
+    END { printf "%s%s\n", first, rest }' "$1"
+}
 
-      # Here-strings, not an echo pipe — zsh's echo mangles backslashes in
-      # timelog descriptions and jq then rejects the whole response.
-      LAST_LOGGED=""; LAST_MIN=0
-      if [ "$HTTP" != "200" ]; then
-        echo "  ⚠ GET /projects/api/v3/time.json → HTTP ${HTTP} — cursor falls back to floor(now)" >&2
-      elif ! LAST_LOGGED=$(jq -r '.timelogs[0].timeLogged // empty' <<<"$RESP") \
-         || ! LAST_MIN=$(jq -r '.timelogs[0].minutes // 0' <<<"$RESP"); then
-        echo "  ⚠ time.json response is not valid JSON — cursor falls back to floor(now)" >&2
-        LAST_LOGGED=""; LAST_MIN=0
-      fi
+# "Patrí sem aj:" lines for tasks appended to an earlier entry (rules section 4).
+tw_also_lines() {
+  local label
+  if [ "$TW_LANG" = "en" ]; then label="Also covers:"; else label="Patrí sem aj:"; fi
+  awk -F '\t' -v l="$label" -v h="$TW_HASH" '{ d = l " #" $1 " " $5 " — " $6; if (h == "true" && $4 != "-") d = d " (commit: " $4 ")"; print d }' "$1"
+}
 
-      if [ -n "$LAST_LOGGED" ]; then
-        LAST_TS=$(parse_iso "$LAST_LOGGED")
-        if [ -n "$LAST_TS" ]; then
-          END_TS=$(( LAST_TS + LAST_MIN * 60 ))
-          END_DATE=$(date -r "$END_TS" +%Y-%m-%d 2>/dev/null \
-                  || date -d "@$END_TS" +%Y-%m-%d 2>/dev/null)
+# POST one entry: $1 task id, $2 start epoch, $3 minutes, $4 description.
+# Prints the new timelog id ("-" when the answer has none); status 1 on failure.
+tw_post_entry() {
+  local payload http id
+  payload=$(jq -nc --argjson minutes "$3" --arg desc "$4" --arg date "$(tw_day "$2")" \
+    --arg time "$(tw_hms "$2")" --argjson billable "$TW_BILLABLE" \
+    '{timelog: {hours: 0, minutes: $minutes, description: $desc, date: $date, time: $time, isbillable: $billable}}')
+  http=$(curl -sS -o "$TW_JOB_DIR/timelog_resp.json" -w '%{http_code}' -u "$AUTH" \
+    -H "Content-Type: application/json" -H "Accept: application/json" \
+    -X POST -d "$payload" "${BASE}/projects/api/v3/tasks/$1/time.json")
+  if [ "$http" -lt 200 ] || [ "$http" -ge 300 ]; then
+    echo "  ⚠ POST /projects/api/v3/tasks/$1/time.json → HTTP ${http}" >&2
+    return 1
+  fi
+  id=$(jq -r '.timelog.id // empty' "$TW_JOB_DIR/timelog_resp.json" 2>/dev/null)
+  [ -n "$id" ] || echo "  ⚠ POST time.json → HTTP ${http} without .timelog.id — this entry cannot be extended at the end of the run" >&2
+  echo "${id:--}"
+}
 
-          # Guards: must still be today, must not be in the future
-          if [ "$END_DATE" = "$TODAY" ] && [ "$END_TS" -le $((NOW_TS + 60)) ]; then
-            # Align UP to rounding step
-            REM=$(( END_TS % ROUND_SECS ))
-            [ "$REM" -ne 0 ] && END_TS=$(( END_TS + (ROUND_SECS - REM) ))
-            if [ "$END_TS" -le "$NOW_TS" ]; then
-              SESSION_CURSOR_TS=$END_TS
-              TIME_CURSOR_SOURCE="last_timelog @ $(date -r "$END_TS" +%H:%M 2>/dev/null || date -d "@$END_TS" +%H:%M)"
-            fi
-          fi
-        fi
-      fi
-    fi
-    ;;
-esac
+# PATCH the description of entry $1 to $2 — the minutes stay.
+tw_patch_description() {
+  local payload http
+  payload=$(jq -nc --arg desc "$2" '{timelog: {description: $desc}}')
+  http=$(curl -sS -o "$TW_JOB_DIR/timelog_resp.json" -w '%{http_code}' -u "$AUTH" \
+    -H "Content-Type: application/json" -H "Accept: application/json" \
+    -X PATCH -d "$payload" "${BASE}/projects/api/v3/time/$1.json")
+  if [ "$http" -lt 200 ] || [ "$http" -ge 300 ]; then
+    echo "  ⚠ PATCH /projects/api/v3/time/$1.json → HTTP ${http}" >&2
+    return 1
+  fi
+}
 
-if [ -z "$SESSION_CURSOR_TS" ]; then
-  SESSION_CURSOR_TS=$(floor_now)
-  TIME_CURSOR_SOURCE="skill start (first log of day)"
-fi
+# A written entry: $1 timelog id, $2 start, $3 minutes, $4 owner, $5 rows
+# file, $6 note, $7 description. Its tasks go to the done-column queue.
+tw_record_entry() {
+  local others
+  others=$(awk -F '\t' -v o="$4" '$1 != o { printf "%s%s", s, $1; s = "," }' "$5")
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "${others:--}" "$6" >> "$TW_JOB_DIR/entries.tsv"
+  printf '%s\n' "$1" > "$TW_JOB_DIR/last_entry.id"
+  printf '%s' "$7" > "$TW_JOB_DIR/last_entry.desc"
+  cut -f1 "$5" >> "$TW_JOB_DIR/done_moves.txt"
+}
+
+# Tasks of rows file $1 end with no entry, reason $2 (Step 7 names them).
+tw_unlog() {
+  awk -F '\t' -v r="$2" '{ print $1 "\t" $2 "\t" r }' "$1" >> "$TW_JOB_DIR/time_unlogged.tsv"
+}
+TWLIB
+echo "  ℹ time-logging helpers → $TW_JOB_DIR/timelog_lib.sh" >&2
 ```
 
-Three hard guarantees from this algorithm:
-1. **First log of the day** → cursor = `floor(now)` (no carry-over from yesterday).
-2. **No future timestamps** — if the computed cursor would be in the future (clock skew, manually edited timelog), fall back to `floor(now)`.
-3. **No cross-midnight bleed** — yesterday's last timelog is not considered.
+**Step 5.5b — mode and cursor.** Run once, right before the worker loop (after
+the plan approval — plan time is not billed):
 
-`TIME_CURSOR_SOURCE` is shown in the Step 7 final summary so the user knows exactly where today's billing line started.
+```bash
+# (run preamble — see Step 3)
+# Step 5.5b — time mode and cursor
+USER_ID="<USER_ID from Step 2.7, empty if unresolved>"
+RULES_LOADED="<1 = work-rules:wame-time-logging is loaded | 0 = the skill is not installed>"
+LOG_FROM="<HH:MM from --log-from= or 'loguj od' / 'čas od' — else empty>"
+if [ -z "$USER_ID" ]; then
+  # Step 2.7 failed — one retry; still empty means time logging is off.
+  USER_ID=$(curl -sS -u "$AUTH" -H "Accept: application/json" "${BASE}/me.json" | jq -r '.person.id // empty' 2>/dev/null)
+  if [ -n "$USER_ID" ]; then echo "  ℹ Teamwork user id ${USER_ID} — carry it into the later USER_ID lines" >&2; fi
+fi
+. "$TW_JOB_DIR/timelog_lib.sh"
+STRATEGY=$(jq -r '.time_cursor_strategy // "last_teamwork_timelog"' "$CONFIG_FILE")
+for F in bundle.tsv log_from_tasks.tsv entries.tsv time_merged.tsv time_unlogged.tsv done_moves.txt board_stage.tsv; do
+  : > "$TW_JOB_DIR/$F"
+done
+rm -f "$TW_JOB_DIR/last_entry.id" "$TW_JOB_DIR/last_entry.desc" "$TW_JOB_DIR/log_from_start" "$TW_JOB_DIR/cursor"
+NOW=$(date +%s)
+MODE=bundle; CURSOR=""; SRC=""
+
+if [ "$RULES_LOADED" != "1" ]; then
+  MODE=off; SRC="time not logged — the work-rules plugin is missing (/plugin install work-rules@wame)"
+elif [ -z "$USER_ID" ]; then
+  MODE=off; SRC="time not logged — the Teamwork user is unknown, so own entries cannot be checked for overlaps"
+elif [ -n "$LOG_FROM" ]; then
+  FROM_TS=$(tw_parse_hhmm "$LOG_FROM")
+  if [ -z "$FROM_TS" ] || [ "$FROM_TS" -ge "$NOW" ]; then
+    MODE=ask_start; SRC="start time '${LOG_FROM}' is not a time earlier today"
+  else
+    START=$(tw_grid_up "$FROM_TS"); LIMIT=$(tw_grid_up "$NOW")
+    MODE=log_from; CURSOR=$START; SRC="user start ${LOG_FROM} → $(tw_hm "$START")"
+    if ROWS=$(tw_own_entries_today); then
+      CLASH=$(awk -F '\t' -v s="$START" -v e="$LIMIT" '$1 < e && $2 > s { n++; if ($2 > m) m = $2 } END { if (n) print n "\t" m }' <<<"$ROWS")
+      if [ -n "$CLASH" ]; then
+        echo "CLASH ${CLASH%%$'\t'*} own entry/entries inside $(tw_hm "$START")–$(tw_hm "$LIMIT"); the last ends $(tw_hm "${CLASH##*$'\t'}")"
+      fi
+    else
+      echo "  ⚠ the span is checked again right before the write (Step 6.12b)" >&2
+    fi
+  fi
+else
+  FLOOR=$(tw_grid_down "$NOW")
+  if ! LAST_END=$(tw_last_own_end); then
+    CURSOR=$FLOOR; SRC="timesheet not readable → floor of now $(tw_hm "$FLOOR"); re-read before every write"
+  elif [ -z "$LAST_END" ]; then
+    CURSOR=$FLOOR; SRC="first entry today → $(tw_hm "$FLOOR")"
+  else
+    G=$(tw_grid_up "$LAST_END")
+    if [ "$STRATEGY" = "floor_now" ] && [ "$FLOOR" -gt "$G" ]; then
+      CURSOR=$FLOOR; SRC="floor_now → $(tw_hm "$FLOOR") (last entry today ended $(tw_hm "$LAST_END"))"
+    else
+      # Even when that end lies after now: never floor(now) over an entry.
+      CURSOR=$G; SRC="last entry today ended $(tw_hm "$LAST_END") → $(tw_hm "$G")"
+      if [ "$G" -gt "$NOW" ]; then SRC="${SRC} (after now — the work waits in the bundle until the clock gets there)"; fi
+    fi
+  fi
+fi
+
+printf '%s\n' "$MODE" > "$TW_JOB_DIR/time_logging"
+printf '%s\n' "$SRC"  > "$TW_JOB_DIR/cursor_source"
+if [ -n "$CURSOR" ]; then printf '%s\n' "$CURSOR" > "$TW_JOB_DIR/cursor"; fi
+if [ "$MODE" = "log_from" ]; then printf '%s\n' "$CURSOR" > "$TW_JOB_DIR/log_from_start"; fi
+echo "TIME mode=${MODE} · ${SRC}"
+```
+
+Where the cursor starts (rules section 1):
+
+- **`last_teamwork_timelog`** (default) — at the end of your latest-ending own
+  entry of today, moved **up** to the grid (`10:03 → 10:05`); with no entry
+  today at `floor(now)`.
+- **`floor_now`** — at `floor(now)`, or at the end of your latest own entry
+  today (moved up to the grid) when that is later. It never starts inside an
+  existing entry.
+- **An entry that ends after now** (somebody logged ahead of the clock) still
+  sets the cursor — never `floor(now)` over it. Nothing fits until the clock
+  gets there, so the work waits in the bundle (Step 6.8).
+- **Timesheet not readable** (a `⚠` line names the endpoint) → `floor(now)`
+  for now; Step 6.8 re-reads before every write, moves the cursor up when
+  needed and writes nothing while the timesheet stays unreadable.
+- **Teamwork user unknown** (Step 2.7) → own entries cannot be read, so no
+  overlap can be ruled out: `time_logging=off` for this run, and Step 7 lists
+  every committed task with its measured minutes.
+- **No carry-over from yesterday** — only entries that start today count.
+
+After a successful write the cursor moves to the entry's end (Step 6.8);
+after a failed write it does not move. `cursor_source` is printed in Step 7.
+
+**Start-time mode** (rules section 5). When the user says when the work
+started — `--log-from=HH:MM`, or *„loguj od 13:00“* / *„čas od 13:00“* in the
+message that started the run — put the time in `LOG_FROM`. Step 5.5b moves it
+up to the grid and checks the span from there to the limit:
+- `TIME mode=ask_start` — not a time earlier today: ask for it again via
+  **AskUserQuestion** and re-run Step 5.5b.
+- `CLASH …` — an own entry already lies in the span: stop and ask via
+  **AskUserQuestion** — *start after it at <HH:MM>* / *another start time* /
+  *log the usual way (bundle from the cursor)* — and re-run Step 5.5b with the
+  answer (`LOG_FROM` empty for the usual way).
+
+In start-time mode Step 6.8 records each committed task and writes nothing;
+Step 6.12b splits the span once, at the end, after the user's OK.
+
+`time_mode=ask` (rules section 7) asks before every entry written in Step 6.8,
+with the value these rules give as the proposal; see Step 6.8.
 
 ---
 
@@ -2571,8 +2808,9 @@ if [ "$PROCESS_MODE" = "analyse_only" ]; then
 fi
 ```
 
-Initialize `ANALYSE_ONLY_TASKS=()` alongside `SKIPPED_TIMELOGS=()` etc. at
-the start of the worker loop so Step 7 always has a value to render.
+Initialize `ANALYSE_ONLY_TASKS=()` at the start of the worker loop so Step 7
+always has a value to render (the time accounting lives in the Step 5.5 run
+files).
 
 The `process_mode` gate sits *above* the readiness gate (Step 6.0) on
 purpose: an analyse-only task whose description matches a gating phrase
@@ -2711,8 +2949,8 @@ START_TS=$(date +%s)
 # Reset per-task state so the final summary always has a value to print, even
 # if both board moves fail or board_workflow is disabled.
 CURRENT_BOARD_STAGE_FOR_TASK="—"
-TIMELOG_OK=0
 COMMIT_HASH=""
+MEASURED_MIN=""
 ```
 
 If `plan_mode == per_task`, do **not** start the timer here yet — first render a per-task plan (same shape as the overview entry: Goal / Acceptance / Approach / Comments context / Attachments / Board target / Quality dimensions) and ask the user via **AskUserQuestion** to **Approve / Skip / Add context / Cancel run**. Only **after** approval start the timer.
@@ -2751,6 +2989,7 @@ if [ "$BW_ENABLED" = "true" ] \
     echo "  ⚠ board move to 'In progress' failed (HTTP $HTTP) — continuing" >&2
   else
     CURRENT_BOARD_STAGE_FOR_TASK="In progress"
+    printf '%s\tIn progress\n' "$TASK_ID" >> "$TW_JOB_DIR/board_stage.tsv"
   fi
 fi
 ```
@@ -3257,162 +3496,21 @@ Hard rules:
   large to read, or you ran out of room, the status is
   `open(not reviewed — <reason>)`, not `checked`.
 
-### 6.6 Stop timer + decide minutes
-
-v1.3.0 splits the rounding decision into **two zones** controlled by the new
-`round_threshold_minutes` key (default `4`):
-
-- `ELAPSED_MIN >= round_threshold_minutes` → round to the **nearest**
-  `time_rounding_minutes` step using **half-up integer rounding**
-  (`((n + ROUND/2) / ROUND) * ROUND`). With the defaults (`threshold=4`,
-  `ROUND=5`):
-  | elapsed | logged |
-  | ------- | ------ |
-  | 4 min   | 5 min  |
-  | 5 min   | 5 min  |
-  | 6 min   | 5 min  |
-  | 7 min   | 5 min  |
-  | 8 min   | 10 min |
-  | 9 min   | 10 min |
-  | 10 min  | 10 min |
-  | 11 min  | 10 min |
-  | 12 min  | 10 min |
-  | 13 min  | 15 min |
-  | 14 min  | 15 min |
-  | 15 min  | 15 min |
-
-  The exact tipping point is `n + ROUND/2 >= next ROUND multiple`, i.e.
-  the value `2.5`, `7.5`, `12.5`, … rounds *up*. The previous round-up
-  policy (every value over the previous step rounded up) systematically
-  over-billed by 0–4 min per task; round-to-nearest distributes those
-  fractional minutes honestly in both directions.
-- `ELAPSED_MIN >= min_log_minutes` but **strictly below** the threshold → log
-  the **raw** elapsed minutes (1, 2, or 3 with the default threshold of 4).
-  The cursor advances by exactly that many minutes — `TIMELOG_SUB_ROUND=1`
-  is set so Step 7 surfaces the entry as a deliberate sub-round, and the
-  next log starts off the 5-minute grid.
-- `ELAPSED_MIN < min_log_minutes` → either log `min_log_minutes` as a floor
-  (when `time_mode=real_rounded_5m`) or, if the headroom guard in Step 6.6.1
-  fires, skip the log entirely (`TIMELOG_SKIPPED=1`).
+### 6.6 Stop the timer — measured minutes
 
 ```bash
 END_TS=$(date +%s)
-ELAPSED_MIN=$(( (END_TS - START_TS + 59) / 60 ))   # ceil to minutes
-ROUND=$(jq -r '.time_rounding_minutes // 5'      "$CONFIG_FILE")
-THRESHOLD=$(jq -r '.round_threshold_minutes // 4' "$CONFIG_FILE")
-MIN_LOG=$(jq -r '.min_log_minutes // 1'          "$CONFIG_FILE")
-ROUND_SECS=$(( ROUND * 60 ))
-
-# Defensive: if the user set THRESHOLD > ROUND, the "below threshold but
-# rounding applies anyway" zone is incoherent. Treat THRESHOLD > ROUND as
-# "round everything once ELAPSED >= ROUND" — never log raw minutes for
-# ELAPSED values that are already >= ROUND.
-if [ "$THRESHOLD" -gt "$ROUND" ]; then THRESHOLD=$ROUND; fi
-
-DURATION_SOURCE="rounded_nearest"   # rounded_nearest | sub_round_elapsed | floored_min_log
-
-if [ "$ELAPSED_MIN" -ge "$THRESHOLD" ]; then
-  # Round to NEAREST ROUND (half-up). Examples for ROUND=5:
-  #   4 → 5     (4+2)/5 = 1 → 5
-  #   6 → 5     (6+2)/5 = 1 → 5
-  #   7 → 5     (7+2)/5 = 1 → 5
-  #   8 → 10    (8+2)/5 = 2 → 10
-  #   12 → 10   (12+2)/5 = 2 → 10
-  #   13 → 15   (13+2)/5 = 3 → 15
-  HALF=$(( ROUND / 2 ))
-  DURATION_MIN=$(( ((ELAPSED_MIN + HALF) / ROUND) * ROUND ))
-  # Never log a 0-minute entry — if rounding collapsed to 0 (only possible
-  # when ROUND==1 and ELAPSED==0, which is also caught by the MIN_LOG path),
-  # bump up to ROUND.
-  if [ "$DURATION_MIN" -lt "$ROUND" ]; then DURATION_MIN=$ROUND; fi
-  DURATION_SOURCE="rounded_nearest"
-elif [ "$ELAPSED_MIN" -ge "$MIN_LOG" ]; then
-  # Below the rounding threshold but worth logging — write the raw minutes.
-  # Example with defaults (THRESHOLD=4, ROUND=5, MIN_LOG=1):
-  #   1 min →  1 min   (raw, sub-round)
-  #   2 min →  2 min   (raw, sub-round)
-  #   3 min →  3 min   (raw, sub-round)
-  #   4 min →  5 min   (round-to-nearest — handled by the branch above)
-  DURATION_MIN=$ELAPSED_MIN
-  DURATION_SOURCE="sub_round_elapsed"
-  SUB_ROUND_TIMELOGS+=("${TASK_ID}: ${DURATION_MIN}m (elapsed below ${THRESHOLD}m threshold)")
-else
-  # Floor — implementation finished faster than MIN_LOG; log the floor so the
-  # session still produces a trace of this task.
-  DURATION_MIN=$MIN_LOG
-  DURATION_SOURCE="floored_min_log"
-fi
+MEASURED_MIN=$(( (END_TS - START_TS + 59) / 60 ))   # whole minutes, rounded up
 ```
 
-Both `rounded_nearest` and `sub_round_elapsed` results may still be
-**clamped or skipped** by the future-timestamp guard in Step 6.6.1 below —
-the elapsed time is *what the work cost*, the headroom is *what fits
-before `now()`* and the smaller of the two wins. The `DURATION_SOURCE`
-flag plumbs through to Step 7 so the user can see why an entry ended up
-sub-round.
-
-If `time_mode == "ask"` → **AskUserQuestion** with the measured `DURATION_MIN` as the suggested answer; let the user override. The user's override is taken as-is — no extra rounding — because at that point the user has explicitly approved a specific minute count.
-
-### 6.6.1 Future-timestamp guard (hard rule)
-
-The session cursor advances by *logged* minutes, not by *real* minutes — so on a fast run where the model produces work much faster than wall-clock time would allow, the cursor drifts into the future. Teamwork accepts those POSTs without complaint (timesheets can legally hold future entries), but the resulting timesheet is useless for billing and confuses anyone reading it.
-
-Cap `DURATION_MIN` (as computed in Step 6.6) so the resulting log window ends at or before `now()`. v1.3.0 simplifies the clamp logic now that Step 6.6 already produces a fully-decided duration (round-up, sub-round-from-elapsed, or floored-to-min-log). The clamp is "headroom-aware" but **does not re-round** — if Step 6.6 said 3 min (sub-round) and headroom is 10 min, the log stays 3 min. If Step 6.6 said 10 min (round-up) and headroom is 7 min, the log is clamped to 7 min and the entry becomes a sub-round headroom clamp.
-
-```bash
-NOW=$(date +%s)
-# MIN_LOG was already read in Step 6.6; re-read here defensively in case
-# Step 6.6 was skipped (time_mode=ask override).
-MIN_LOG=$(jq -r '.min_log_minutes // 1' "$CONFIG_FILE")
-
-# Exact minutes of headroom (NOT rounded down).
-HEADROOM_SECS=$(( NOW - SESSION_CURSOR_TS ))
-if [ "$HEADROOM_SECS" -lt 0 ]; then HEADROOM_SECS=0; fi
-HEADROOM_MIN_RAW=$(( HEADROOM_SECS / 60 ))
-
-TIMELOG_SKIPPED=0
-# TIMELOG_SUB_ROUND may already be 1 from Step 6.6 (elapsed below threshold).
-TIMELOG_SUB_ROUND=${TIMELOG_SUB_ROUND:-0}
-
-if [ "$HEADROOM_MIN_RAW" -lt "$MIN_LOG" ]; then
-  echo "  ⚠ session cursor at $(date -r "$SESSION_CURSOR_TS" +%H:%M) is at/past now ($(date -r "$NOW" +%H:%M)); headroom ${HEADROOM_MIN_RAW}m < min_log_minutes (${MIN_LOG}m) — skipping timelog for task ${TASK_ID}" >&2
-  TIMELOG_SKIPPED=1
-  SKIPPED_TIMELOGS+=("${TASK_ID} (cursor caught up with real time)")
-elif [ "$DURATION_MIN" -gt "$HEADROOM_MIN_RAW" ]; then
-  # The Step 6.6 duration (whether round-up or sub-round-from-elapsed) does
-  # not fit before now() — clamp to the exact headroom in raw minutes. We do
-  # NOT re-round to ROUND here because that could short-change a 7-min-headroom
-  # round-up entry by logging only 5 min, or skip a 3-min headroom entirely.
-  # Logging the exact headroom is more honest and keeps the cursor in sync.
-  echo "  ⚠ measured ${DURATION_MIN}m would overshoot now() — clamping to ${HEADROOM_MIN_RAW}m so the timelog stays in the past" >&2
-  CLAMPED_TIMELOGS+=("${TASK_ID}: ${DURATION_MIN}m → ${HEADROOM_MIN_RAW}m")
-  DURATION_MIN=$HEADROOM_MIN_RAW
-fi
-
-# Final classification: is DURATION_MIN a clean multiple of ROUND? If not,
-# mark it as sub-round so Step 7 surfaces the entry. Step 6.6 may have
-# already added a SUB_ROUND_TIMELOGS row with the "elapsed below threshold"
-# reason — only add the "clamped by headroom guard" row if no row exists for
-# this task yet, so the user sees one reason per task.
-if [ "${TIMELOG_SKIPPED:-0}" = "0" ] && [ $(( DURATION_MIN % ROUND )) -ne 0 ]; then
-  TIMELOG_SUB_ROUND=1
-  if ! printf '%s\n' "${SUB_ROUND_TIMELOGS[@]}" | grep -q "^${TASK_ID}:"; then
-    SUB_ROUND_TIMELOGS+=("${TASK_ID}: ${DURATION_MIN}m (clamped by headroom guard)")
-  fi
-fi
-```
-
-Why this matters: without the guard, a fast run will silently produce timesheet entries with start/end times that have not happened yet. The PM reads "16:00 — refactor done" at 13:30 and rightly asks how that is possible.
-
-`TIMELOG_SKIPPED=1` plumbs through Step 6.8 — the POST is skipped, the cursor is **not** advanced, and Step 6.8.5 (board move to the done column — *Done - Local* or its fallback) is **also** skipped because the task is not yet considered finished from a billing standpoint. `TIMELOG_SUB_ROUND=1` does NOT skip — the log goes through normally; only the duration is below `ROUND` (or is not a clean multiple of `ROUND`), and Step 7 surfaces `SUB_ROUND_TIMELOGS` alongside the skipped/clamped lists so the user knows which entries broke the 5-min cosmetic alignment and why (`elapsed below threshold` vs `clamped by headroom guard`).
-
-Initialize the accounting arrays once at the start of the worker loop:
-
-```bash
-SKIPPED_TIMELOGS=()
-CLAMPED_TIMELOGS=()
-SUB_ROUND_TIMELOGS=()
-```
+`MEASURED_MIN` is what the task cost on the clock — the *measured minutes* of
+the time-logging rules: from the timer start in Step 6.1 (after the per-task
+approval in `per_task` mode, so waiting for a plan approval is never measured)
+to here, rounded **up** to whole minutes. Nothing is rounded to blocks, capped
+or logged here. Whether and how it reaches the timesheet is decided in
+Step 6.8, after the commit — only committed work is logged (rules, hard
+rule 6), so a task aborted at the Step 6.6.5 gate or whose commit fails never
+joins the bundle. Carry `MEASURED_MIN` literally into the Step 6.8 snippet.
 
 ### 6.6.5 Safety gate — auto-commit or ask?
 
@@ -3529,14 +3627,38 @@ UPDATE(invoice)[123789]: Add PDF export action
 FIX(auth)[124001]: Resolve session timeout race condition
 ```
 
-### 6.8 Log time back to Teamwork
-`POST ${BASE}/projects/api/v3/tasks/${TASK_ID}/time.json`
+### 6.8 Log time — bundle and entry (`wame-time-logging-v1`)
 
-**Non-overlapping, sequential time logs (hard rule).** Even though implementation work may overlap in real time (parallel tool calls, interleaved tasks), the time entries written to Teamwork **must be strictly contiguous** — every log's `date + time + minutes` window must end exactly where the next log's window begins. The plugin uses the `SESSION_CURSOR_TS` from Step 5.5 as the single source of truth and never re-reads wall-clock time inside the loop. Both the start time and the duration are aligned to the rounding step (default 5 minutes), so a log will say `start 10:15, duration 20 min` and the next log will say `start 10:35` — never `10:32` or `10:17`.
+Runs once per **committed** task (`COMMIT_HASH` set in Step 6.7). Analyse-only,
+blocked, skipped and aborted tasks and failed commits never come here — they
+get no time (rules, hard rule 6).
+
+The task joins the run's **bundle** (`$TW_JOB_DIR/bundle.tsv`, Step 5.5). Then
+the snippet re-reads your own entries of today — right before every write,
+because another session may have logged meanwhile — and decides:
+
+| Bundle after this task | Action | What happens |
+| --- | --- | --- |
+| below one block | `hold` | no entry yet; the task waits, and so does its move to the done column |
+| one block or more, enough room | `write` | one entry of the nearest whole block, half up (`7 → 5`, `8 → 10`, `12 → 10`, `13 → 15`) |
+| one block or more, 0 < room < minutes | `write` + cut note | one entry of `room` minutes; Step 7 shows `20 → 15 min — the cursor reached the current block` |
+| room 0 | `full` | no entry yet; the bundle stays open with all its tasks and is tried again after the next task and at the end of the run |
+| own entries cannot be read | `unread` | no entry yet, like `full` — never written blind |
+
+*Room* = `floor((limit − cursor) / block) × block`, the limit being the end of
+the current block, `ceil(now, block)`. The entry goes on the bundle task with
+the **most measured minutes** (a tie: the task finished last), starts at the
+cursor and its date is the cursor's local date. After a successful POST the
+bundle is empty, the cursor moves to the entry's end and every task of the
+bundle is queued in `done_moves.txt` for Step 6.8.5. After a failed POST the
+cursor does not move, nothing is retried blindly, and the bundle's tasks are
+listed in Step 7 with their minutes. So a run never writes a 1–4-minute entry,
+and never 5 minutes for each of several quick tasks that fit one block
+together.
 
 **Description tone — business, not technical.** Write the description from the perspective of someone reading the timesheet for billing or status (PM, client, accountant), not a developer reading a code review. State **what was delivered for the user/business**. Include a technical detail only when it materially helps identify the work (e.g. a specific module name, a flag/feature key, a migration number) — never variable names, line counts, library versions, or diff stats. Keep it to 1–2 sentences in the configured `default_language` (Slovak by default).
 
-**Commit hash suffix.** If `include_commit_hash_in_log_description == true` (default), append ` (commit: <short-hash>)` to the business description so a timesheet reader can jump straight to the change:
+**Commit hash suffix.** If `include_commit_hash_in_log_description == true` (default), ` (commit: <short-hash>)` is appended to the business description so a timesheet reader can jump straight to the change:
 
 > *"Pridaná možnosť exportu faktúr do PDF s podporou témy nájomcu. (commit: a1b2c3d)"*
 
@@ -3550,116 +3672,249 @@ FIX(auth)[124001]: Resolve session timeout race condition
 - *"Updated 8 files, +142 −37 lines, bumped filament/filament to 5.2."*
 - *"Implemented onMounted() lifecycle hook in InvoiceForm.vue."*
 
-**Sequential timestamp logic:**
+`ADD_DONE` is that sentence for this task **without** the commit suffix — the
+snippet adds it. A task implemented with a synthetic input (Step 6.0, option 2)
+starts it with `⚠️ Implementované so syntetickou náhradou — vyžaduje overenie po
+doručení reálneho vkladu.` (English variant for `default_language=en`). Alone
+in an entry, the sentence is the whole description. With two or more tasks the
+entry is a **shared entry** (rules section 4) — a header with the real work
+time, then one line per task, the owner first, the rest in the order they were
+done:
 
-```bash
-# Future-timestamp guard from Step 6.6.1 may have set TIMELOG_SKIPPED=1.
-# In that case do NOT POST — leave TIMELOG_OK=0 so Step 6.8.5 skips the board move
-# and the cursor is not advanced. The accounting array SKIPPED_TIMELOGS is rendered
-# in Step 7.
-if [ "${TIMELOG_SKIPPED:-0}" = "1" ]; then
-  TIMELOG_OK=0
-else
-
-BILLABLE=$(jq -r '.is_billable_by_default | if . == null then true else . end' "$CONFIG_FILE")
-INCL_HASH=$(jq -r '.include_commit_hash_in_log_description | if . == null then true else . end' "$CONFIG_FILE")
-
-# Use the session cursor — NOT wall-clock time.
-# The `time` field is interpreted by Teamwork in the user's LOCAL/profile
-# timezone (it is the inverse of `timeLogged`, which comes back in UTC). So the
-# absolute cursor epoch is formatted here with LOCAL `date -r` (no `-u`).
-# Do NOT switch this to `date -ju`/`date -u` — that would post the UTC
-# wall-clock as if it were local and shift every entry by the local offset,
-# making logs land hours early and overlap. See the TIMEZONE CONTRACT note on
-# parse_iso in Step 5.5.
-LOG_DATE=$(date -r "$SESSION_CURSOR_TS" +%Y-%m-%d 2>/dev/null || date -d "@$SESSION_CURSOR_TS" +%Y-%m-%d)
-LOG_TIME=$(date -r "$SESSION_CURSOR_TS" +%H:%M:%S 2>/dev/null || date -d "@$SESSION_CURSOR_TS" +%H:%M:%S)
-
-DESCRIPTION="$DESCRIPTION_BUSINESS"
-if [ "$INCL_HASH" = "true" ] && [ -n "$COMMIT_HASH" ]; then
-  DESCRIPTION="${DESCRIPTION} (commit: ${COMMIT_HASH})"
-fi
-
-PAYLOAD=$(jq -nc \
-  --argjson minutes "$DURATION_MIN" \
-  --arg desc "$DESCRIPTION" \
-  --arg date "$LOG_DATE" \
-  --arg time "$LOG_TIME" \
-  --argjson billable "$BILLABLE" \
-  '{timelog: {hours: 0, minutes: $minutes, description: $desc, date: $date, time: $time, isbillable: $billable}}')
-
-HTTP=$(curl -sS -o /tmp/tw_timelog_resp.json -w "%{http_code}" -u "$AUTH" \
-  -H "Content-Type: application/json" -H "Accept: application/json" \
-  -X POST -d "$PAYLOAD" \
-  "${BASE}/projects/api/v3/tasks/${TASK_ID}/time.json")
-
-if [ "$HTTP" -ge 200 ] && [ "$HTTP" -lt 300 ]; then
-  # Advance the cursor by exactly the logged duration (already a multiple of ROUND).
-  # This guarantees the next log's start time = this log's end time. No gaps, no overlaps.
-  SESSION_CURSOR_TS=$(( SESSION_CURSOR_TS + DURATION_MIN * 60 ))
-  TIMELOG_OK=1
-else
-  echo "  ⚠ time log POST failed (HTTP $HTTP) — cursor NOT advanced, board move skipped" >&2
-  TIMELOG_OK=0
-fi
-
-fi  # end of TIMELOG_SKIPPED guard
+```
+Spoločný záznam za 3 úlohy (spolu 6 min práce):
+#45522728 Priradenie úlohy viacerým ľuďom — úlohu možno zadať viacerým ľuďom naraz (commit: c0bda4a)
+#45522670 Hashované heslo IMAP — akcia Test pripojenia pomenuje hashované heslo (commit: 26a0001)
+#45522683 Neznámy kód poschodia — import nahlási neznámy kód poschodia (commit: 03053ce)
 ```
 
-Verify HTTP status. On non-2xx → report to the user (do not retry blindly; the commit already exists). Do **not** advance `SESSION_CURSOR_TS` if the POST failed — the next successful log should reuse the same start time so the user's timesheet stays contiguous. Also **skip the next "move to the done column"** step (6.8.5), because the task is not yet considered finished from a billing standpoint.
-
-### 6.8.5 Move task to the done column ("Done - Local", fallbacks "Internal testing" → "Testing")
-
-If the time log succeeded and the project has a resolved done stage, post the card to the done column — `board_workflow.done_stage` (default *Done - Local*, the WAME board's column for work finished locally), else the first of `done_stage_fallbacks` (default *Internal testing*, then *Testing*) that exists on the task's board, as resolved in Step 3.3:
+(`Shared entry for 3 tasks (6 min of work in total):` for
+`default_language=en`.)
 
 ```bash
 # (run preamble — see Step 3)
-TASK_ID="<current task id>"
-TIMELOG_OK="<1 if the Step 6.8 POST succeeded, else 0>"
-PROJECT_ID=$(awk -F '\t' -v id="$TASK_ID" '$1 == id { print $2; exit }' "$TW_JOB_DIR/task_projects.tsv" 2>/dev/null)
-BOARD_FILE="$TW_JOB_DIR/board_${PROJECT_ID}.tsv"
-WORKFLOW_ID=""; DONE_STAGE_ID=""; DONE_RESOLVED_NAME=""; BOARD_DISABLED=1
-if [ -n "$PROJECT_ID" ] && [ -s "$BOARD_FILE" ]; then
-  WORKFLOW_ID=$(awk -F '\t'        '$1 == "workflow_id"        { print $2; exit }' "$BOARD_FILE")
-  DONE_STAGE_ID=$(awk -F '\t'      '$1 == "done_stage_id"      { print $2; exit }' "$BOARD_FILE")
-  DONE_RESOLVED_NAME=$(awk -F '\t' '$1 == "done_resolved_name" { print $2; exit }' "$BOARD_FILE")
-  BOARD_DISABLED=$(awk -F '\t'     '$1 == "disabled"           { print $2; exit }' "$BOARD_FILE")
-else
-  echo "  ⚠ [#${TASK_ID}] no project id / no Step 3.3 board state (project '${PROJECT_ID}') — board move to the done column skipped" >&2
-fi
-BW_ENABLED=$(jq -r '.board_workflow.enabled | if . == null then true else . end' "$CONFIG_FILE")
+# Step 6.8 — bundle and entry
+USER_ID="<USER_ID from Step 2.7>"
+ADD_TASK_ID="<the task just committed — empty in Step 6.12>"
+ADD_MEASURED="<MEASURED_MIN from Step 6.6>"
+ADD_ESTIMATE="<the task's estimate in minutes from the Step 4 plan — empty when it has none>"
+ADD_COMMIT="<COMMIT_HASH from Step 6.7>"
+ADD_TITLE='<task title>'
+ADD_DONE='<one business sentence — what was delivered, without the commit suffix>'
+FINAL="<0 = after a task | 1 = end of the run (Step 6.12)>"
+DRY_RUN="<0 | 1 = print the proposal only (time_mode=ask)>"
+MINUTES_OVERRIDE="<empty | the minutes the user typed (time_mode=ask), 0 = do not log>"
+. "$TW_JOB_DIR/timelog_lib.sh"
+MODE=$(cat "$TW_JOB_DIR/time_logging" 2>/dev/null || echo off)
+BUNDLE="$TW_JOB_DIR/bundle.tsv"; touch "$BUNDLE"
 
-if [ "${TIMELOG_OK:-0}" = "1" ] \
-   && [ "$BW_ENABLED" = "true" ] \
-   && [ "$BOARD_DISABLED" != "1" ] \
-   && [ -n "$WORKFLOW_ID" ] && [ -n "$DONE_STAGE_ID" ]; then
-  HTTP=$(curl -sS -o /dev/null -w "%{http_code}" -u "$AUTH" \
-    -H "Content-Type: application/json" -H "Accept: application/json" \
-    -X POST -d "{\"taskIds\":[${TASK_ID}]}" \
-    "${BASE}/projects/api/v3/workflows/${WORKFLOW_ID}/stages/${DONE_STAGE_ID}/tasks.json")
-  if [ "$HTTP" -ge 200 ] && [ "$HTTP" -lt 300 ]; then
-    CURRENT_BOARD_STAGE_FOR_TASK="${DONE_RESOLVED_NAME:-done column}"
-  else
-    echo "  ⚠ board move to '${DONE_RESOLVED_NAME:-done column}' failed (HTTP $HTTP) — continuing" >&2
+# 1. The committed task joins the run — once (a DRY_RUN pass already added it).
+if [ -n "$ADD_TASK_ID" ]; then
+  case "$ADD_ESTIMATE" in ''|0|*[!0-9]*) ADD_ESTIMATE="-" ;; esac
+  case "$MODE" in
+    bundle)   TARGET="$BUNDLE" ;;
+    log_from) TARGET="$TW_JOB_DIR/log_from_tasks.tsv" ;;
+    *)        TARGET="$TW_JOB_DIR/time_unlogged.tsv" ;;
+  esac
+  touch "$TARGET"
+  if ! awk -F '\t' -v id="$ADD_TASK_ID" '$1 == id { f = 1 } END { exit !f }' "$TARGET"; then
+    if [ "$MODE" = "bundle" ] || [ "$MODE" = "log_from" ]; then
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$ADD_TASK_ID" "$ADD_MEASURED" "$ADD_ESTIMATE" "${ADD_COMMIT:--}" \
+        "$(printf '%s' "$ADD_TITLE" | tr '\t\n' '  ')" "$(printf '%s' "$ADD_DONE" | tr '\t\n' '  ')" >> "$TARGET"
+    else
+      printf '%s\t%s\t%s\n' "$ADD_TASK_ID" "$ADD_MEASURED" "$(cat "$TW_JOB_DIR/cursor_source" 2>/dev/null)" >> "$TARGET"
+    fi
   fi
 fi
+
+if [ "$MODE" != "bundle" ]; then
+  # 2. Start-time mode or no time logging: nothing is written per task.
+  if [ "$MODE" = "log_from" ]; then
+    echo "  ℹ [#${ADD_TASK_ID}] ${ADD_MEASURED} min recorded — the start-time split is written in Step 6.12b" >&2
+  else
+    echo "  ⚠ no time entry — $(cat "$TW_JOB_DIR/cursor_source" 2>/dev/null)" >&2
+  fi
+else
+  # 3. Bundle: re-read the own timesheet, then decide (rules sections 1–3).
+  CURSOR=$(cat "$TW_JOB_DIR/cursor")
+  COUNT=$(awk 'END { print NR }' "$BUNDLE")
+  TOTAL=$(awk -F '\t' '{ s += $2 } END { print s + 0 }' "$BUNDLE")
+  # Owner: the most measured minutes; a tie goes to the task finished last.
+  OWNER=$(awk -F '\t' '($2 + 0) >= m { m = $2 + 0; id = $1 } END { print id }' "$BUNDLE")
+  ACTION=""; NOTE="-"; WRITE_MIN=0
+  if [ "$COUNT" -gt 0 ]; then
+    if LAST_END=$(tw_last_own_end); then
+      if [ -n "$LAST_END" ] && [ "$(tw_grid_up "$LAST_END")" -gt "$CURSOR" ]; then
+        echo "  ℹ an own entry ends at $(tw_hm "$LAST_END") — cursor $(tw_hm "$CURSOR") → $(tw_hm "$(tw_grid_up "$LAST_END")")" >&2
+        CURSOR=$(tw_grid_up "$LAST_END")
+        printf '%s\n' "$CURSOR" > "$TW_JOB_DIR/cursor"
+      fi
+    else
+      ACTION="unread"
+    fi
+  fi
+  NOW=$(date +%s)
+  ROOM=$(tw_room "$CURSOR" "$NOW")
+  MINUTES=$(tw_entry_minutes "$TOTAL" "$FINAL")
+  if [ -n "$ACTION" ]; then :
+  elif [ "$COUNT" -eq 0 ]; then ACTION="empty"
+  elif [ "$MINUTES" -eq 0 ]; then ACTION="hold"
+  elif [ "$ROOM" -eq 0 ]; then ACTION="full"
+  elif [ "$ROOM" -lt "$MINUTES" ]; then
+    ACTION="write"; WRITE_MIN=$ROOM; NOTE="${MINUTES} → ${ROOM} min — the cursor reached the current block"
+  else
+    ACTION="write"; WRITE_MIN=$MINUTES
+  fi
+  if [ "$ACTION" = "write" ] && [ -n "$MINUTES_OVERRIDE" ]; then
+    if [ "$MINUTES_OVERRIDE" -le 0 ]; then
+      ACTION="declined"
+    else
+      NOTE="typed by the user: ${MINUTES_OVERRIDE} min (proposed ${WRITE_MIN})"
+      if [ $(( MINUTES_OVERRIDE % BLOCK )) -ne 0 ]; then NOTE="${NOTE} — not whole ${BLOCK}-minute blocks"; fi
+      WRITE_MIN=$MINUTES_OVERRIDE
+    fi
+  fi
+  echo "PROPOSAL action=${ACTION} · bundle ${COUNT} task(s), ${TOTAL} min · entry ${WRITE_MIN} min $(tw_hm "$CURSOR")–$(tw_hm $(( CURSOR + WRITE_MIN * 60 ))) on #${OWNER:--} · room ${ROOM} min · note: ${NOTE}"
+
+  if [ "$DRY_RUN" != "1" ]; then
+    case "$ACTION" in
+      write)
+        DESC=$(tw_describe "$BUNDLE" "$OWNER")
+        if TL_ID=$(tw_post_entry "$OWNER" "$CURSOR" "$WRITE_MIN" "$DESC"); then
+          tw_record_entry "$TL_ID" "$CURSOR" "$WRITE_MIN" "$OWNER" "$BUNDLE" "$NOTE" "$DESC"
+          tw_grid_up $(( CURSOR + WRITE_MIN * 60 )) > "$TW_JOB_DIR/cursor"
+          echo "  ✓ time entry $(tw_hm "$CURSOR")–$(tw_hm $(( CURSOR + WRITE_MIN * 60 ))) · ${WRITE_MIN} min on #${OWNER} · ${COUNT} task(s)" >&2
+        else
+          echo "  ⚠ no time entry — the cursor stays at $(tw_hm "$CURSOR"); not retried, Step 7 lists the tasks" >&2
+          tw_unlog "$BUNDLE" "the time entry POST failed"
+        fi
+        : > "$BUNDLE" ;;
+      declined)
+        tw_unlog "$BUNDLE" "the user chose not to log it"
+        : > "$BUNDLE" ;;
+      full|unread)
+        if [ "$FINAL" != "1" ]; then
+          echo "  ⏸ bundle held (${ACTION}): ${COUNT} task(s), ${TOTAL} min — tried again after the next task and at the end of the run" >&2
+        else
+          # End of the run with room 0 (rules section 3): append the tasks to
+          # the last entry this run wrote — the description only, the minutes stay.
+          LAST_ID=$(cat "$TW_JOB_DIR/last_entry.id" 2>/dev/null)
+          if [ -n "$LAST_ID" ] && [ "$LAST_ID" != "-" ]; then
+            NEW_DESC=$(printf '%s\n%s' "$(cat "$TW_JOB_DIR/last_entry.desc")" "$(tw_also_lines "$BUNDLE")")
+            if tw_patch_description "$LAST_ID" "$NEW_DESC"; then
+              awk -F '\t' -v t="$LAST_ID" '{ print $1 "\t" t }' "$BUNDLE" >> "$TW_JOB_DIR/time_merged.tsv"
+              cut -f1 "$BUNDLE" >> "$TW_JOB_DIR/done_moves.txt"
+              printf '%s' "$NEW_DESC" > "$TW_JOB_DIR/last_entry.desc"
+              echo "  ✓ no room — ${COUNT} task(s) appended to the last entry of this run" >&2
+            else
+              tw_unlog "$BUNDLE" "no room, and the edit of the last entry failed"
+            fi
+          elif [ "$ACTION" = "full" ]; then
+            tw_unlog "$BUNDLE" "the timesheet is full until $(tw_hm "$CURSOR")"
+          else
+            tw_unlog "$BUNDLE" "own entries could not be read, so an overlap could not be ruled out"
+          fi
+          : > "$BUNDLE"
+        fi ;;
+      hold)
+        echo "  ⏸ bundle ${TOTAL} min < ${BLOCK} min — no entry yet; the move to the done column waits with it" >&2 ;;
+    esac
+  fi
+fi
+```
+
+Fill the placeholder lines literally; write `ADD_TITLE` and `ADD_DONE` in
+single quotes (an apostrophe as `'\''`) so nothing in the text is expanded.
+
+**`time_mode=ask`** (rules section 7). Run the snippet with `DRY_RUN=1` first:
+it adds the task and prints `PROPOSAL …` without writing. When the action is
+`write`, ask via **AskUserQuestion** — *"Záznam <start>–<end> (<n> min) na
+#<owner> <(spolu s #…)>?"* — with **<n> min** (the proposal, recommended),
+**Iný počet minút** (free text) and **Nezapisovať**, then run the snippet again
+with `DRY_RUN=0` and `MINUTES_OVERRIDE` = the typed number (empty for the
+proposal, `0` for *Nezapisovať*). A typed number is final; one that is not
+whole blocks is noted once in Step 7. `hold` and `empty` need nothing more;
+for `full` / `unread` run it again with `DRY_RUN=0` right away — inside the
+loop that only holds the bundle, at the end of the run it appends to the last
+entry, which changes no minutes, so there is nothing to confirm.
+
+Then run Step 6.8.5 and Step 6.9 — both work on the tasks whose entry was just
+written (`done_moves.txt`), which may include tasks finished earlier in the
+run; while the bundle is held they move nothing (Step 6.9 with `after_commit`
+still removes the current task's folder).
+
+### 6.8.5 Move tasks to the done column ("Done - Local", fallbacks "Internal testing" → "Testing")
+
+Every task whose time entry was just written — the whole bundle, queued in
+`done_moves.txt` by Step 6.8 or Step 6.12 — moves to the done column:
+`board_workflow.done_stage` (default *Done - Local*, the WAME board's column
+for work finished locally), else the first of `done_stage_fallbacks` (default
+*Internal testing*, then *Testing*) that exists on the task's board, as
+resolved in Step 3.3. A task still held in the bundle stays in *In progress*
+until its bundle is written; a task that ends with no entry stays there too,
+and Step 7 says so.
+
+```bash
+# (run preamble — see Step 3)
+BW_ENABLED=$(jq -r '.board_workflow.enabled | if . == null then true else . end' "$CONFIG_FILE")
+touch "$TW_JOB_DIR/done_moves.txt"
+while IFS= read -r TASK_ID; do
+  [ -n "$TASK_ID" ] || continue
+  PROJECT_ID=$(awk -F '\t' -v id="$TASK_ID" '$1 == id { print $2; exit }' "$TW_JOB_DIR/task_projects.tsv" 2>/dev/null)
+  BOARD_FILE="$TW_JOB_DIR/board_${PROJECT_ID}.tsv"
+  WORKFLOW_ID=""; DONE_STAGE_ID=""; DONE_RESOLVED_NAME=""; BOARD_DISABLED=1
+  if [ -n "$PROJECT_ID" ] && [ -s "$BOARD_FILE" ]; then
+    WORKFLOW_ID=$(awk -F '\t'        '$1 == "workflow_id"        { print $2; exit }' "$BOARD_FILE")
+    DONE_STAGE_ID=$(awk -F '\t'      '$1 == "done_stage_id"      { print $2; exit }' "$BOARD_FILE")
+    DONE_RESOLVED_NAME=$(awk -F '\t' '$1 == "done_resolved_name" { print $2; exit }' "$BOARD_FILE")
+    BOARD_DISABLED=$(awk -F '\t'     '$1 == "disabled"           { print $2; exit }' "$BOARD_FILE")
+  else
+    echo "  ⚠ [#${TASK_ID}] no project id / no Step 3.3 board state (project '${PROJECT_ID}') — board move to the done column skipped" >&2
+  fi
+  if [ "$BW_ENABLED" = "true" ] \
+     && [ "$BOARD_DISABLED" != "1" ] \
+     && [ -n "$WORKFLOW_ID" ] && [ -n "$DONE_STAGE_ID" ]; then
+    HTTP=$(curl -sS -o /dev/null -w "%{http_code}" -u "$AUTH" \
+      -H "Content-Type: application/json" -H "Accept: application/json" \
+      -X POST -d "{\"taskIds\":[${TASK_ID}]}" \
+      "${BASE}/projects/api/v3/workflows/${WORKFLOW_ID}/stages/${DONE_STAGE_ID}/tasks.json")
+    if [ "$HTTP" -ge 200 ] && [ "$HTTP" -lt 300 ]; then
+      printf '%s\t%s\n' "$TASK_ID" "${DONE_RESOLVED_NAME:-done column}" >> "$TW_JOB_DIR/board_stage.tsv"
+    else
+      echo "  ⚠ [#${TASK_ID}] board move to '${DONE_RESOLVED_NAME:-done column}' failed (HTTP $HTTP) — continuing" >&2
+    fi
+  fi
+done < "$TW_JOB_DIR/done_moves.txt"
 ```
 
 Interaction with `auto_complete_finished_tasks`: both run independently. If the user enabled task completion *and* board moves, the task ends up `completed=true` *and* in the done stage — Teamwork is fine with both flags set.
 
 ### 6.9 Cleanup attachments
 
-Once the time log (and the optional board move) is done, remove the attachment working folder according to `attachments_cleanup`:
+Remove the attachment working folders according to `attachments_cleanup`, then
+empty the queue Step 6.8.5 just worked through:
 
 ```bash
+# (run preamble — see Step 3)
+TASK_ID="<current task id — empty in Step 6.12>"
 CLEAN_MODE=$(jq -r '.attachments_cleanup // "after_timelog"' "$CONFIG_FILE")
-case "$CLEAN_MODE" in
-  after_commit|after_timelog) rm -rf "$ATTACH_DIR" ;;
-  never) : ;;
-esac
+touch "$TW_JOB_DIR/done_moves.txt"
+if [ "$CLEAN_MODE" = "after_commit" ] && [ -n "$TASK_ID" ]; then
+  rm -rf "./teamwork-task-${TASK_ID}"
+fi
+if [ "$CLEAN_MODE" = "after_commit" ] || [ "$CLEAN_MODE" = "after_timelog" ]; then
+  while IFS= read -r ID; do
+    [ -n "$ID" ] && rm -rf "./teamwork-task-${ID}"
+  done < "$TW_JOB_DIR/done_moves.txt"
+fi
+: > "$TW_JOB_DIR/done_moves.txt"
 ```
 
-`after_commit` is intentionally honored here (even though we are past 6.7) so power-users who set it explicitly still get the same end state. The recommended default `after_timelog` keeps files available for inspection if a time log POST fails.
+`after_commit` removes the folder of the task right after its commit;
+`after_timelog` (default) removes a task's folder once its time entry is
+written — for a task held in the bundle that is when the bundle is written
+(Step 6.12 at the latest). A task that ends with no entry keeps its folder, so
+the files stay available while the time is sorted out by hand.
 
 ### 6.10 Complete the task in Teamwork (optional)
 
@@ -3676,12 +3931,176 @@ Continue the loop.
 
 ---
 
+## Step 6.12 — End of the run: write what is left (before Step 7)
+
+Runs once, after the worker loop — also when the loop ended early (a
+cancelled run still logs the work it committed). Read
+`$TW_JOB_DIR/time_logging`:
+
+- **`bundle`** — run the Step 6.8 snippet with `FINAL=1` and every `ADD_*`
+  line empty (in `time_mode=ask` with the same `DRY_RUN` round as there). A
+  bundle that is not empty becomes one entry — **one block** when it holds less
+  than one block (`A 1` → 5 min), else the nearest block, cut to the room. With
+  **room 0** the snippet appends `Patrí sem aj: #<id> <title> — <what was done>`
+  lines (`Also covers:` for `default_language=en`) to the description of the
+  last entry this run wrote, via `PATCH /projects/api/v3/time/{id}.json` — the
+  description only, the minutes stay. When this run wrote no entry, nothing is
+  written and Step 7 names the tasks with the reason
+  (`the timesheet is full until 10:15`).
+- **`log_from`** — split the span: Step 6.12b.
+- **`off`** — nothing to write; Step 7 lists the tasks.
+
+Then run **Step 6.8.5** and **Step 6.9** once more, with `TASK_ID` empty — the
+moves to the done column and the attachment cleanup that waited for the bundle
+happen here.
+
+### Step 6.12b — Start-time split (rules section 5)
+
+The span runs from the start (`log_from_start`, already on the grid) to the
+limit, `ceil(now, block)`; it holds `span / block` blocks. They are split over
+the committed tasks **in proportion to their estimates** (a task without an
+estimate counts with its measured minutes) by largest remainder: every task
+gets `floor(share)`, and the blocks left over go one each to the largest
+fractional parts (a tie: the larger estimate, then the earlier task). A task
+that gets 0 blocks has no entry of its own — it is named in the entry with the
+most blocks, in the shared-entry format. The entries follow each other from
+the start, in task order.
+
+Example: start 13:00, now 14:02 → limit 14:05 → 13 blocks; estimates A 60,
+B 30, C 15 → shares 7.43 / 3.71 / 1.86 → floors 7 / 3 / 1, the 2 blocks left go
+to C (.86) and B (.71) → A 13:00–13:35, B 13:35–13:55, C 13:55–14:05.
+
+Run the snippet with `CONFIRMED=0`, show its table to the user and ask via
+**AskUserQuestion**: **Zapísať** (run again with `CONFIRMED=1`) / **Iný
+začiatok** (run again with `LOG_FROM_NEW=<HH:MM>` and `CONFIRMED=0`) /
+**Nezapisovať** (run again with `CONFIRMED=no`; Step 7 lists the tasks). Write
+only after the user's OK. `STOP …` means the span is not free (an own entry
+already lies in it), holds no block, or cannot be checked — ask for another
+start or *Nezapisovať*; never write over an entry.
+
+```bash
+# (run preamble — see Step 3)
+# Step 6.12b — start-time split
+USER_ID="<USER_ID from Step 2.7>"
+CONFIRMED="<0 = show the split | 1 = write it (after the user's OK) | no = log nothing>"
+LOG_FROM_NEW="<empty | HH:MM when the user gave another start>"
+. "$TW_JOB_DIR/timelog_lib.sh"
+TASKS="$TW_JOB_DIR/log_from_tasks.tsv"; touch "$TASKS"
+PLAN_FILE="$TW_JOB_DIR/log_from_plan.tsv"
+ROWS_FILE="$TW_JOB_DIR/log_from_entry.tsv"
+NOW=$(date +%s); LIMIT=$(tw_grid_up "$NOW")
+if [ -n "$LOG_FROM_NEW" ]; then
+  FROM_TS=$(tw_parse_hhmm "$LOG_FROM_NEW")
+  if [ -n "$FROM_TS" ] && [ "$FROM_TS" -lt "$NOW" ]; then
+    tw_grid_up "$FROM_TS" > "$TW_JOB_DIR/log_from_start"
+    printf 'user start %s → %s\n' "$LOG_FROM_NEW" "$(tw_hm "$(cat "$TW_JOB_DIR/log_from_start")")" > "$TW_JOB_DIR/cursor_source"
+  else
+    echo "  ⚠ start time '${LOG_FROM_NEW}' is not a time earlier today — the previous start stays" >&2
+  fi
+fi
+START=$(cat "$TW_JOB_DIR/log_from_start")
+SLOTS=$(( (LIMIT - START) / (BLOCK * 60) ))
+COUNT=$(awk 'END { print NR }' "$TASKS")
+STOP=""
+if [ "$CONFIRMED" = "no" ]; then
+  STOP="declined"
+elif [ "$COUNT" -eq 0 ]; then
+  STOP="no committed task — nothing to log"
+elif [ "$SLOTS" -le 0 ]; then
+  STOP="the span $(tw_hm "$START")–$(tw_hm "$LIMIT") holds no block"
+elif ! ROWS=$(tw_own_entries_today); then
+  STOP="own entries of today could not be read, so the span cannot be checked"
+else
+  CLASH=$(awk -F '\t' -v s="$START" -v e="$LIMIT" '$1 < e && $2 > s { n++; if ($2 > m) m = $2 } END { if (n) print n "\t" m }' <<<"$ROWS")
+  if [ -n "$CLASH" ]; then
+    STOP="${CLASH%%$'\t'*} own entry/entries already inside $(tw_hm "$START")–$(tw_hm "$LIMIT"), the last ends $(tw_hm "${CLASH##*$'\t'}")"
+  fi
+fi
+
+if [ "$STOP" = "declined" ]; then
+  tw_unlog "$TASKS" "the user chose not to log the start-time split"
+  : > "$TASKS"
+  echo "SPLIT declined — nothing written"
+elif [ -n "$STOP" ]; then
+  echo "STOP ${STOP}"
+else
+  # Per task, in task order: id, estimate, measured, blocks, start, end, and
+  # the task whose entry names it (itself, or the one with the most blocks).
+  awk -F '\t' -v B="$SLOTS" -v S="$START" -v BS=$(( BLOCK * 60 )) '
+    { n++; id[n] = $1; es[n] = $3; me[n] = $2
+      w[n] = ($3 != "-" && $3 + 0 > 0) ? $3 + 0 : $2 + 0; W += w[n] }
+    END {
+      left = B
+      for (i = 1; i <= n; i++) { f[i] = int(B * w[i] / W); r[i] = (B * w[i]) % W; left -= f[i] }
+      while (left > 0) {
+        b = 0
+        for (i = 1; i <= n; i++)
+          if (!g[i] && (b == 0 || r[i] > r[b] || (r[i] == r[b] && w[i] > w[b]))) b = i
+        f[b]++; g[b] = 1; left--
+      }
+      h = 0
+      for (i = 1; i <= n; i++) if (f[i] > f[h]) h = i
+      t = S
+      for (i = 1; i <= n; i++) {
+        if (f[i] > 0) { print id[i] "\t" es[i] "\t" me[i] "\t" f[i] "\t" t "\t" (t + f[i] * BS) "\t" id[i]; t += f[i] * BS }
+        else print id[i] "\t" es[i] "\t" me[i] "\t0\t-\t-\t" id[h]
+      }
+    }' "$TASKS" > "$PLAN_FILE"
+
+  echo "SPLIT $(tw_hm "$START")–$(tw_hm "$LIMIT") · ${SLOTS} block(s) of ${BLOCK} min"
+  while IFS=$'\t' read -r P_ID P_EST P_MEAS P_BLK P_S P_E P_OWN; do
+    if [ "$P_BLK" -gt 0 ]; then WHEN="$(tw_hm "$P_S")–$(tw_hm "$P_E")"; else WHEN="no entry of its own — named in the entry of #${P_OWN}"; fi
+    printf '  #%s · estimate %s · measured %s min · %s block(s) · %s\n' "$P_ID" "$P_EST" "$P_MEAS" "$P_BLK" "$WHEN"
+  done < "$PLAN_FILE"
+
+  if [ "$CONFIRMED" = "1" ]; then
+    FAILED=""
+    while IFS=$'\t' read -r P_ID P_EST P_MEAS P_BLK P_S P_E P_OWN; do
+      [ "$P_BLK" -gt 0 ] || continue
+      awk -F '\t' -v o="$P_ID" 'NR == FNR { if ($7 == o) m[$1] = 1; next } ($1 in m)' "$PLAN_FILE" "$TASKS" > "$ROWS_FILE"
+      if [ -n "$FAILED" ]; then tw_unlog "$ROWS_FILE" "not written — ${FAILED}"; continue; fi
+      # Re-read right before every write: another session may have logged meanwhile.
+      if ! ROWS=$(tw_own_entries_today); then
+        FAILED="own entries could not be read before the write"; tw_unlog "$ROWS_FILE" "not written — ${FAILED}"; continue
+      fi
+      if [ -n "$(awk -F '\t' -v s="$P_S" -v e="$P_E" '$1 < e && $2 > s' <<<"$ROWS")" ]; then
+        FAILED="an own entry appeared inside $(tw_hm "$P_S")–$(tw_hm "$P_E")"; tw_unlog "$ROWS_FILE" "not written — ${FAILED}"; continue
+      fi
+      DESC=$(tw_describe "$ROWS_FILE" "$P_ID")
+      if TL_ID=$(tw_post_entry "$P_ID" "$P_S" $(( P_BLK * BLOCK )) "$DESC"); then
+        tw_record_entry "$TL_ID" "$P_S" $(( P_BLK * BLOCK )) "$P_ID" "$ROWS_FILE" "-" "$DESC"
+        echo "  ✓ time entry $(tw_hm "$P_S")–$(tw_hm "$P_E") · $(( P_BLK * BLOCK )) min on #${P_ID}" >&2
+      else
+        FAILED="the entry of #${P_ID} failed"; tw_unlog "$ROWS_FILE" "not written — ${FAILED}"
+      fi
+    done < "$PLAN_FILE"
+    printf '%s\n' "$LIMIT" > "$TW_JOB_DIR/cursor"
+    : > "$TASKS"
+  fi
+fi
+```
+
+After the write, Step 6.8.5 and Step 6.9 run once (with `TASK_ID` empty) for
+the tasks of the written entries. A failed entry stops the rest of the split —
+the entries would no longer follow each other — and Step 7 lists the tasks
+that were not written.
+
+---
+
 ## Step 7 — Final summary
 
-After the loop ends, print a markdown table:
+After the loop and the Step 6.12 flush, print a markdown table:
 
-| # | Task ID | Title | Minutes | Commit | TW status | Board stage | Build quality |
-|---|---------|-------|---------|--------|-----------|-------------|---------------|
+| # | Task ID | Title | Measured | Time entry | Commit | TW status | Board stage | Build quality |
+|---|---------|-------|----------|------------|--------|-----------|-------------|---------------|
+
+- **Measured** — the task's `MEASURED_MIN` (Step 6.6); `—` for a task that was
+  not committed.
+- **Time entry** — from the Step 5.5 run files: `10:00–10:10 · 10 min` (own
+  entry), `in 10:00–10:05 on #<owner>` (shared entry), `appended to
+  10:05–10:25` (`time_merged.tsv`), `none — <reason>` (`time_unlogged.tsv`);
+  `—` for analyse-only, skipped and aborted tasks.
+- **Board stage** — the task's last row in `board_stage.tsv`, else `—`.
 
 The **Build quality** cell comes from `$TW_JOB_DIR/build_quality.tsv`
 (Step 6.5.5), one short token per active key — e.g. `ui_ux ✓ · perf n/a ·
@@ -3690,17 +4109,45 @@ task without rows in that file shows `not self-checked` — never an implied ✓
 `+N tip` counts the task's `framework` `suggest` rows; they never turn the
 cell into a failure.
 
-Followed by a short status block:
+Then the time summary (rules section 8) — render it from the run files:
+
+```bash
+# (run preamble — see Step 3)
+. "$TW_JOB_DIR/timelog_lib.sh"
+J="$TW_JOB_DIR"
+echo "Time rules:   wame-time-logging-v1 (work-rules:wame-time-logging) — mode $(cat "$J/time_logging" 2>/dev/null)"
+echo "Time cursor:  $(cat "$J/cursor_source" 2>/dev/null)"
+echo "Time entries:"
+while IFS=$'\t' read -r E_ID E_START E_MIN E_OWNER E_OTHERS E_NOTE; do
+  [ -n "$E_ID" ] || continue
+  LINE="  $(tw_hm "$E_START")–$(tw_hm $(( E_START + E_MIN * 60 ))) · ${E_MIN} min · #${E_OWNER}"
+  if [ "$E_OTHERS" != "-" ]; then LINE="${LINE} · with #$(printf '%s' "$E_OTHERS" | sed 's/,/, #/g')"; fi
+  if [ "$E_NOTE" != "-" ]; then LINE="${LINE} · ${E_NOTE}"; fi
+  printf '%s\n' "$LINE"
+done < "$J/entries.tsv"
+echo "Appended to an earlier entry:"
+awk -F '\t' '{ print "  #" $1 " → entry " $2 }' "$J/time_merged.tsv"
+echo "No time entry:"
+awk -F '\t' '{ print "  #" $1 " (" $2 " min) — " $3 }' "$J/time_unlogged.tsv"
+```
+
+Show `none` under a heading whose list is empty. The **cut** entries and the
+minutes the user typed in `time_mode=ask` are the notes at the end of their
+entry line (`20 → 15 min — the cursor reached the current block`,
+`typed by the user: 7 min (proposed 10) — not whole 5-minute blocks`). When
+*No time entry* lists anything, add a short paragraph: why those tasks have no
+entry (the reason column — e.g. the timesheet is full until 10:15 because
+another session logged ahead of the clock, or the `work-rules` plugin is
+missing: `/plugin install work-rules@wame`), that their cards stay in *In
+progress* and their attachment folders stay, and that the user can log those
+minutes by hand (whole 5-minute blocks) and move the cards.
+
+Followed by the rest of the status block:
 
 ```
-Time cursor: <TIME_CURSOR_SOURCE>           e.g. "last_timelog @ 10:50"
-                                            or  "skill start (first log of day)"
 Work mode (Step 2.65):                        <full | fast — N task(s) recorded in .claude/work-mode-deferred.local.md; run /work-mode full before pushing>
 Tasklist filter:                              <start columns <TF_TODO_LABEL> + me — N implemented, M analyse-only (K not on the board), L dropped> | <disabled / single-task URL>
 Analyse-only tasks (not touched):             <list of [#id] title from ANALYSE_ONLY_TASKS or none>
-Timelogs skipped (cursor caught up with now): <list from SKIPPED_TIMELOGS or none>
-Timelogs below 5-min rounding (sub-round):    <list from SUB_ROUND_TIMELOGS or none>
-Timelogs clamped to fit before now:           <list from CLAMPED_TIMELOGS or none>
 Attachments skipped (size):                   <lines of $TW_JOB_DIR/skipped_attachments.txt or none>
 Board moves disabled for projects:            <projects whose board_<id>.tsv says disabled 1, or none>
 Comments read (Step 3.5):                     <per task COMMENTS_STATE, e.g. "[#123] newest of 8 read">
@@ -3715,8 +4162,6 @@ part of the run the developer still owes, and Step 8 hands the same list to
 in code the task did not otherwise change (the Step 6.3 no-drive-by
 guardrail), so list them as candidates for a separate refactor task, not as
 defects.
-
-When `SKIPPED_TIMELOGS` is non-empty, also print a short paragraph telling the user **why** those entries did not land in Teamwork (the cursor reached `now()` mid-run, typically because the model produces work faster than wall-clock) and suggest they either re-run later (the cursor will continue from the last successful log) or fill those minutes in manually. The skipped tasks' board cards were **not** moved to the done column (*Done - Local* or its fallback) either — they will be moved on the next run that successfully logs them.
 
 The push reminder is intentionally **not** printed here — it moves to Step 9, after the optional verification handoff, so the user sees test results before they decide whether to push.
 
@@ -3759,7 +4204,7 @@ Do **not** treat this as an error — the user may have intentionally chosen not
 
 ### 8.2 — Skip when nothing to verify
 
-If every task in the run ended in *aborted*, *skipped*, or had a failed time log (`TIMELOG_OK == 0`), there is nothing meaningful to verify. Print one line ("No completed tasks in this run — skipping verification.") and proceed to Step 9.
+If no task of the run was committed (every task ended *aborted*, *skipped*, *blocked* or analyse-only), there is nothing meaningful to verify — a committed task is verified whether or not its time entry was written. Print one line ("No completed tasks in this run — skipping verification.") and proceed to Step 9.
 
 Otherwise, build the argument string from the originally-parsed URL plus a few sensible overrides:
 
@@ -3768,7 +4213,7 @@ ORIG_URL="<the URL the user passed to /teamwork-task>"
 TEST_ARGS="$ORIG_URL --time-log=true --language=${DEFAULT_LANG:-sk}"
 ```
 
-We pass `--time-log=true` explicitly so QA work continues the same sequential, non-overlapping time cursor that the implementation phase just advanced — both skills resolve the cursor via the **last Teamwork timelog of the day**, so the test skill's first log automatically starts where the implementation phase's last log ended (no gaps, no overlaps, no manual handover).
+We pass `--time-log=true` explicitly so QA work continues the same sequential, non-overlapping time cursor that the implementation phase just advanced — Step 6.12 has written every entry of this run before the handoff, and both skills follow the same `work-rules` time-logging rules and resolve the cursor via the **last own Teamwork timelog of the day**, so the test skill's first entry starts where the implementation phase's last entry ended (no gaps, no overlaps, no manual handover).
 
 ### 8.2.5 — Hand the build-time quality notes to QA (v1.5.0)
 
@@ -3829,7 +4274,7 @@ If the `Skill` tool call itself errors (transient MCP issue, skill not loadable)
 After Step 7's summary and Step 8's optional verification handoff:
 
 > **Push manually when ready:** `git push` (or `git push -u origin <branch>` for a new feature branch).
-> Time logs were written to Teamwork for each task; cards were moved on the board per project configuration.
+> Time was logged to Teamwork as listed in the Step 7 time summary (whole 5-minute blocks, quick tasks in shared entries); cards were moved on the board per project configuration.
 > If the verification step reported any ❌ failures, consider fixing those first before pushing.
 
 When running in a worktree, the push reminder above is followed by the
@@ -3855,8 +4300,8 @@ skill itself.
 - `config.worktree_handoff.skip_if_no_commits == true` AND
   `git rev-parse HEAD == WT_HEAD_BEFORE` (no new commits this run)
 - The run was cancelled at plan approval (Step 4) — nothing to wrap up
-- Every implemented task ended in aborted / skipped / `TIMELOG_OK=0` (no
-  commits actually landed)
+- Every implemented task ended in aborted / skipped / blocked (no commits
+  actually landed)
 
 ### Step 9.5.1 — Compute new commits
 
