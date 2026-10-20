@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.9.1] - 2026-10-20
+
+Task ids in a time-entry description are written in parentheses, `(45504762)`, the
+same way as commits — not as `#45504762`. Teamwork reads a `#word` of a new entry as a
+hashtag: it cut the id out of the text and created a global tag with that name, so
+17 shared entries of 2026-10-19/20 lost their task references and the tag list
+filled with 25 numbers and one colour (`#22c55e`). Follows `work-rules` 1.0.1
+(`wame-time-logging` section 4).
+
+### Fixed
+
+- `tw_describe` and `tw_also_lines` write `(<id>) <title> — <done>` for each task of a
+  shared entry and for every `Patrí sem aj:` / `Also covers:` line.
+- `tw_post_entry` and `tw_patch_description` drop a `#` that stands right before a
+  letter or a digit anywhere in the description (`TW_NO_HASHTAG`), so a `#word` in
+  `ADD_DONE` does not become a tag either.
+
 ## [1.9.0] - 2026-10-16
 
 QA entries of 2–3 minutes showed up on the timesheet. `teamwork-task-test`

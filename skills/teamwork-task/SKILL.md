@@ -2600,7 +2600,7 @@ tw_describe() {
   fi
   printf '%s\n' "$head"
   awk -F '\t' -v o="$2" -v h="$TW_HASH" '
-    { d = "#" $1 " " $5 " — " $6; if (h == "true" && $4 != "-") d = d " (commit: " $4 ")" }
+    { d = "(" $1 ") " $5 " — " $6; if (h == "true" && $4 != "-") d = d " (commit: " $4 ")" }
     $1 == o { first = d; next }
     { rest = rest "\n" d }
     END { printf "%s%s\n", first, rest }' "$1"
@@ -2610,8 +2610,12 @@ tw_describe() {
 tw_also_lines() {
   local label
   if [ "$TW_LANG" = "en" ]; then label="Also covers:"; else label="Patrí sem aj:"; fi
-  awk -F '\t' -v l="$label" -v h="$TW_HASH" '{ d = l " #" $1 " " $5 " — " $6; if (h == "true" && $4 != "-") d = d " (commit: " $4 ")"; print d }' "$1"
+  awk -F '\t' -v l="$label" -v h="$TW_HASH" '{ d = l " (" $1 ") " $5 " — " $6; if (h == "true" && $4 != "-") d = d " (commit: " $4 ")"; print d }' "$1"
 }
+
+# A description with no "#" right before a letter or a digit (rules section 4):
+# Teamwork turns "#45504762" or "#22c55e" into a global tag and cuts it from the text.
+TW_NO_HASHTAG='gsub("#+(?<c>[\\p{L}\\p{N}])"; "\(.c)")'
 
 # POST one entry: $1 task id, $2 start epoch, $3 minutes, $4 description.
 # Prints the new timelog id ("-" when the answer has none); status 1 on failure.
@@ -2619,7 +2623,7 @@ tw_post_entry() {
   local payload http id
   payload=$(jq -nc --argjson minutes "$3" --arg desc "$4" --arg date "$(tw_day "$2")" \
     --arg time "$(tw_hms "$2")" --argjson billable "$TW_BILLABLE" \
-    '{timelog: {hours: 0, minutes: $minutes, description: $desc, date: $date, time: $time, isbillable: $billable}}')
+    "{timelog: {hours: 0, minutes: \$minutes, description: (\$desc | ${TW_NO_HASHTAG}), date: \$date, time: \$time, isbillable: \$billable}}")
   http=$(curl -sS -o "$TW_JOB_DIR/timelog_resp.json" -w '%{http_code}' -u "$AUTH" \
     -H "Content-Type: application/json" -H "Accept: application/json" \
     -X POST -d "$payload" "${BASE}/projects/api/v3/tasks/$1/time.json")
@@ -2635,7 +2639,7 @@ tw_post_entry() {
 # PATCH the description of entry $1 to $2 — the minutes stay.
 tw_patch_description() {
   local payload http
-  payload=$(jq -nc --arg desc "$2" '{timelog: {description: $desc}}')
+  payload=$(jq -nc --arg desc "$2" "{timelog: {description: (\$desc | ${TW_NO_HASHTAG})}}")
   http=$(curl -sS -o "$TW_JOB_DIR/timelog_resp.json" -w '%{http_code}' -u "$AUTH" \
     -H "Content-Type: application/json" -H "Accept: application/json" \
     -X PATCH -d "$payload" "${BASE}/projects/api/v3/time/$1.json")
@@ -3683,13 +3687,17 @@ done:
 
 ```
 Spoločný záznam za 3 úlohy (spolu 6 min práce):
-#45522728 Priradenie úlohy viacerým ľuďom — úlohu možno zadať viacerým ľuďom naraz (commit: c0bda4a)
-#45522670 Hashované heslo IMAP — akcia Test pripojenia pomenuje hashované heslo (commit: 26a0001)
-#45522683 Neznámy kód poschodia — import nahlási neznámy kód poschodia (commit: 03053ce)
+(45522728) Priradenie úlohy viacerým ľuďom — úlohu možno zadať viacerým ľuďom naraz (commit: c0bda4a)
+(45522670) Hashované heslo IMAP — akcia Test pripojenia pomenuje hashované heslo (commit: 26a0001)
+(45522683) Neznámy kód poschodia — import nahlási neznámy kód poschodia (commit: 03053ce)
 ```
 
 (`Shared entry for 3 tasks (6 min of work in total):` for
-`default_language=en`.)
+`default_language=en`.) The task id stands in parentheses, never as `#<id>`:
+Teamwork turns a `#word` of a new entry into a global tag and cuts it from the
+text. `tw_post_entry` and `tw_patch_description` drop a `#` that stands right
+before a letter or a digit anywhere in the description, so a colour like
+`#22c55e` in `ADD_DONE` does not become a tag either.
 
 ```bash
 # (run preamble — see Step 3)
@@ -3941,7 +3949,7 @@ cancelled run still logs the work it committed). Read
   line empty (in `time_mode=ask` with the same `DRY_RUN` round as there). A
   bundle that is not empty becomes one entry — **one block** when it holds less
   than one block (`A 1` → 5 min), else the nearest block, cut to the room. With
-  **room 0** the snippet appends `Patrí sem aj: #<id> <title> — <what was done>`
+  **room 0** the snippet appends `Patrí sem aj: (<id>) <title> — <what was done>`
   lines (`Also covers:` for `default_language=en`) to the description of the
   last entry this run wrote, via `PATCH /projects/api/v3/time/{id}.json` — the
   description only, the minutes stay. When this run wrote no entry, nothing is

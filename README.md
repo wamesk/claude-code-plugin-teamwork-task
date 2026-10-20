@@ -10,7 +10,7 @@ entries. Push to remote is intentionally left to the user.
 
 Part of the [`wame`](https://github.com/wamesk/claude-code) Claude Code plugin marketplace.
 
-**Current version:** 1.9.0 — see [`CHANGELOG.md`](CHANGELOG.md) for the full release history.
+**Current version:** 1.9.1 — see [`CHANGELOG.md`](CHANGELOG.md) for the full release history.
 
 ---
 
@@ -645,7 +645,7 @@ How the minutes are decided:
   block. An entry longer than the room is cut to it (`20 → 15 min — the cursor
   reached the current block`, shown in the summary); with no room the bundle
   waits. If there is still no room at the end of the run, its tasks are
-  appended to the run's last entry (`Patrí sem aj: #<id> <task> — <what was
+  appended to the run's last entry (`Patrí sem aj: (<id>) <task> — <what was
   done>`; the minutes stay), or — when the run wrote no entry — named in the
   summary (`the timesheet is full until 10:15`).
 
@@ -710,9 +710,9 @@ An entry that holds two or more tasks is a **shared entry**: the first line says
 
 ```
 Spoločný záznam za 3 úlohy (spolu 6 min práce):
-#45522728 Priradenie úlohy viacerým ľuďom — úlohu možno zadať viacerým ľuďom naraz (commit: c0bda4a)
-#45522670 Hashované heslo IMAP — akcia Test pripojenia pomenuje hashované heslo (commit: 26a0001)
-#45522683 Neznámy kód poschodia — import nahlási neznámy kód poschodia (commit: 03053ce)
+(45522728) Priradenie úlohy viacerým ľuďom — úlohu možno zadať viacerým ľuďom naraz (commit: c0bda4a)
+(45522670) Hashované heslo IMAP — akcia Test pripojenia pomenuje hashované heslo (commit: 26a0001)
+(45522683) Neznámy kód poschodia — import nahlási neznámy kód poschodia (commit: 03053ce)
 ```
 
 ## Time tracking modes
